@@ -1,9 +1,19 @@
-/* global $, stopEvent, communicator, chrome, registerEventListener */
+/* global stopEvent, communicator, chrome, registerEventListener */
 ( function ( window, document ) {
+  console.log('[delugesiphon] Content handler script loaded');
+
   /* env check */
-  if (!document || ! document.addEventListener || !document.body || !document.body.addEventListener) {
+  if (!document || !document.addEventListener || !document.body || !document.body.addEventListener) {
+    console.warn('[delugesiphon] Environment check failed:', {
+      document: !!document,
+      addEventListener: !!document?.addEventListener,
+      body: !!document?.body,
+      bodyAddEventListener: !!document?.body?.addEventListener
+    });
     return;
   }
+
+  console.log('[delugesiphon] Environment check passed');
 
   var CONTROL_KEY_DEPRESSED = false,
     SITE_META = {
@@ -16,95 +26,452 @@
       + '|\\.torrent', // eslint-disable-line no-useless-escape
       TORRENT_URL_ATTRIBUTE: 'href',
       INSTALLED: false
-    },
-    log = function () {};
+    };
 
-  function extract_torrent_url ( target ) {
-    var $target = $( target ),
-      $element = $target, torrent_match, torrent_url,
+  console.log('[delugesiphon] SITE_META initialized:', SITE_META);
+
+  const log = function (...args) {
+    console.log('[delugesiphon]', `[${SITE_META.DOMAIN}]`, ...args);
+  };
+
+  const warn = function (...args) {
+    console.warn('[delugesiphon]', `[${SITE_META.DOMAIN}]`, ...args);
+  };
+
+  // Verify communicator is available
+  if (!communicator) {
+    console.error('[delugesiphon] Communicator not found in global scope');
+    return;
+  }
+
+  console.log('[delugesiphon] Communicator found:', {
+    isObject: typeof communicator === 'object',
+    hasInit: typeof communicator.init === 'function',
+    hasObserveConnect: typeof communicator.observeConnect === 'function'
+  });
+
+  // Queue for messages that need to be sent when connection is restored
+  let messageQueue = [];
+  let isReconnecting = false;
+
+  // Safe message sender that queues messages when disconnected
+  function safeSendMessage(message, callback) {
+    if (!communicator || !communicator._Connected) {
+      warn('Connection not available, queueing message:', message);
+      messageQueue.push({ message, callback });
+      if (!isReconnecting) {
+        reconnect();
+      }
+      return;
+    }
+
+    try {
+      communicator.sendMessage(message, callback, function(error) {
+        warn('Message send failed:', error);
+        messageQueue.push({ message, callback });
+        if (!isReconnecting) {
+          reconnect();
+        }
+      });
+    } catch (e) {
+      warn('Error sending message:', e);
+      messageQueue.push({ message, callback });
+      if (!isReconnecting) {
+        reconnect();
+      }
+    }
+  }
+
+  // Process queued messages
+  function processMessageQueue() {
+    while (messageQueue.length > 0 && communicator && communicator._Connected) {
+      const { message, callback } = messageQueue.shift();
+      try {
+        communicator.sendMessage(message, callback);
+      } catch (e) {
+        warn('Error processing queued message:', e);
+        messageQueue.unshift({ message, callback }); // Put it back at the start
+        break;
+      }
+    }
+  }
+
+  // Attempt to reconnect
+  function reconnect() {
+    if (isReconnecting) return;
+    isReconnecting = true;
+    
+    log('Attempting to reconnect...');
+    
+    // Reset communicator state
+    if (communicator) {
+      communicator._Connected = false;
+      communicator._port = null;
+    }
+
+    // Try to reinitialize
+    initialize().then(() => {
+      isReconnecting = false;
+      log('Reconnection successful');
+      processMessageQueue();
+    }).catch(e => {
+      isReconnecting = false;
+      warn('Reconnection failed:', e);
+      // Try again after a delay
+      setTimeout(reconnect, 2000);
+    });
+  }
+
+  // Initialize communication with background page
+  function initCommunication() {
+    return new Promise((resolve, reject) => {
+      log('Starting communication initialization');
+      
+      if (!communicator) {
+        warn('Communicator not available at init time');
+        reject(new Error('Communicator not available'));
+        return;
+      }
+
+      log('Communicator state:', {
+        isConnected: communicator._Connected,
+        hasPort: !!communicator._port,
+        observerCounts: {
+          connect: communicator._connect_observers.length,
+          disconnect: communicator._disconnect_observers.length,
+          message: communicator._message_observers.length
+        }
+      });
+
+      // Set up observers before initializing
+      communicator
+        .observeConnect(function() {
+          log('Connect observer triggered');
+          connected = true;
+          clearTimeout(timeout);
+          resolve();
+        })
+        .observeDisconnect(function() {
+          warn('Disconnect observer triggered');
+          cleanup_handlers();
+          if (!connected) {
+            reject(new Error('Connection failed'));
+          } else if (!isReconnecting) {
+            reconnect();
+          }
+        })
+        .observeMessage(function(request, sendResponse) {
+          log('Message observer received:', request);
+          
+          // Handle context menu click specifically
+          if (request.method === "context-menu-click") {
+            log('Processing context menu click with data:', request);
+            
+            // Show modal directly for context menu clicks
+            showModal({
+                method: 'addlink-todeluge:withoptions',
+                url: request.url,
+                domain: SITE_META.DOMAIN,
+                info: { name: 'Add Torrent' }
+            });
+            
+            if (typeof sendResponse === 'function') {
+                sendResponse({ success: true });
+            }
+            return true;
+          }
+          
+          // Handle direct modal requests
+          if (request.method === "add_dialog" || request.method === "addlink-todeluge:withoptions") {
+            log('Showing add dialog for:', request);
+            try {
+                showModal(request);
+                if (typeof sendResponse === 'function') {
+                    sendResponse({ success: true });
+                }
+            } catch (e) {
+                warn('Error showing modal:', e);
+                if (typeof sendResponse === 'function') {
+                    sendResponse({ error: e.message });
+                }
+            }
+            return true;
+          }
+          
+          // Log unhandled messages
+          log('Unhandled message:', request);
+          if (typeof sendResponse === 'function') {
+            sendResponse({ error: 'Unhandled message type' });
+          }
+          return true;
+        });
+
+      let connected = false;
+      let retryCount = 0;
+      const maxRetries = 3;
+      const retryDelay = 1000; // 1 second between retries
+      
+      function tryConnect() {
+        if (connected) return;
+        
+        try {
+          log('Attempting connection, try #' + (retryCount + 1));
+          communicator.init(true);
+          log('Communicator initialized');
+          
+          // Test connection immediately
+          setTimeout(() => {
+            if (!connected) {
+              safeSendMessage({ method: 'ping' }, function(response) {
+                log('Ping response received:', response);
+                if (response) {
+                  log('Connection verified via ping');
+                  connected = true;
+                  clearTimeout(timeout);
+                  resolve();
+                } else if (retryCount < maxRetries) {
+                  retryCount++;
+                  setTimeout(tryConnect, retryDelay);
+                }
+              });
+            }
+          }, 100);
+        } catch (e) {
+          warn('Error during connection attempt:', e);
+          if (retryCount < maxRetries) {
+            retryCount++;
+            setTimeout(tryConnect, retryDelay);
+          } else {
+            reject(new Error('Max retries reached'));
+          }
+        }
+      }
+      
+      // Set a timeout to reject if connection takes too long
+      const timeout = setTimeout(() => {
+        if (!connected) {
+          warn('Communication initialization timed out');
+          reject(new Error('Connection timeout'));
+        }
+      }, 5000);
+
+      // Start connection attempt
+      tryConnect();
+    });
+  }
+
+  // Initialize the site functionality
+  async function initialize() {
+    try {
+      log('Starting initialization...');
+      
+      // First establish communication
+      await initCommunication();
+      
+      // Initialize site functionality immediately
+      site_init();
+      
+      // Initialize modal container
+      modal_init();
+      
+      // Notify background page that content script is ready
+      safeSendMessage({ 
+        method: 'content-script-ready',
+        domain: SITE_META.DOMAIN,
+        regex: SITE_META.TORRENT_REGEX
+      }, function(response) {
+        log('Background page notified of content script ready:', response);
+      });
+      
+      log('Initialization complete');
+    } catch (e) {
+      warn('Initialization error:', e);
+      
+      if (!initialize.retrying) {
+        initialize.retrying = true;
+        setTimeout(() => {
+          warn('Retrying initialization...');
+          initialize.retrying = false;
+          initialize();
+        }, 2000);
+      } else {
+        warn('Max retries reached - please refresh the page');
+      }
+    }
+  }
+
+  function cleanup_handlers() {
+    document.removeEventListener('keydown', handle_keydown);
+    document.removeEventListener('keyup', handle_keyup);
+    document.removeEventListener('contextmenu', handle_contextmenu);
+    document.body.removeEventListener('click', handle_leftclick);
+  }
+
+  function extract_torrent_url(target) {
+    log('Attempting to extract torrent URL from:', target);
+    var element = target, torrent_match, torrent_url,
       attr = SITE_META.TORRENT_URL_ATTRIBUTE,
-      regex = new RegExp( SITE_META.TORRENT_REGEX ), val;
+      regex = new RegExp(SITE_META.TORRENT_REGEX);
 
-    log( regex );
+    log('Initial element:', element, 'with attribute:', attr);
+    
+    // Try the target element first
+    if (element.getAttribute(attr)) {
+      log('Found attribute on target element');
+    } else {
+      // Try parent if no attribute on target
+      element = target.parentElement;
+      log('Trying parent element:', element);
+    }
+    
+    if (!element.getAttribute(attr)) {
+      // Try finding first anchor tag
+      element = target.closest('a');
+      if (!element) {
+      element = target.querySelector('a');
+      }
+      log('Trying anchor element:', element);
+    }
+    
+    if (!element) {
+      log('No suitable element found');
+      return;
+    }
 
-    if ( !$element.attr( attr ) )
-      $element = $target.parent( 'a' );
-    if ( !$element.attr( attr ) )
-      $element = $target.children( 'a' );
-    if ( !$element.length ) return;
-    val = attr === 'href' ? $element[ 0 ].href : $element.attr( attr );
-    if ( !!val )
-      torrent_match = val.match( regex );
-    log( regex, val, torrent_match );
-    if ( !!torrent_match )
+    // Get the URL value
+    val = attr === 'href' ? element.href : element.getAttribute(attr);
+    log('Found URL value:', val);
+    
+    if (val) {
+      // First try exact regex match
+      torrent_match = val.match(regex);
+      log('Regex match result:', torrent_match);
+      
+      if (!torrent_match) {
+        // Fallback: check if it ends with .torrent
+        if (val.endsWith('.torrent')) {
+          log('URL ends with .torrent, using as fallback');
+          torrent_match = { input: val };
+        }
+        // Fallback: check if it contains 'download.php' or similar
+        else if (val.includes('download.php') || val.includes('dl.php') || val.includes('get.php')) {
+          log('URL contains download pattern, using as fallback');
+          torrent_match = { input: val };
+        }
+      }
+    }
+    
+    if (torrent_match) {
       torrent_url = torrent_match.input;
+      log('Successfully extracted torrent URL:', torrent_url);
+    } else {
+      log('No torrent URL pattern matched');
+    }
+    
     return torrent_url;
   }
 
-  function process_event ( e, with_options ) {
-    // process the event and if possible, sends the extracted link to the controller
-    var torrent_url = extract_torrent_url( e.target );
-    if ( !torrent_url ) return;
-    log( 'Extrated torrent_url: `' + torrent_url + '`' );
-    stopEvent( e );
+  function process_event(e, with_options) {
+    log('Processing event:', e, 'with options:', with_options);
+    var torrent_url = extract_torrent_url(e.target);
+    if (!torrent_url) {
+      log('No torrent URL found in event target');
+      return;
+    }
+    
+    log('Processing torrent URL:', torrent_url, 'with options:', with_options);
+    stopEvent(e);
 
-    if ( !!with_options ) {
-
-      communicator.sendMessage( {
-
+    if (with_options) {
+      log('Requesting add dialog');
+      safeSendMessage({
         method: 'addlink-todeluge:withoptions',
         url: torrent_url,
         domain: SITE_META.DOMAIN
-
-      }, showModal );
-
+      }, function(response) {
+        log('Received response for add dialog request:', response);
+        if (response.error) {
+          warn('Error showing add dialog:', response.error);
+          return;
+        }
+        showModal(response);
+      });
     } else {
-
-      // default label?
-      communicator.sendMessage( {
+      safeSendMessage({
         method: "storage-get-default_label"
-      }, function ( response ) {
-
+      }, function(response) {
         var options = {
           method: 'addlink-todeluge',
           url: torrent_url,
           domain: SITE_META.DOMAIN
         };
 
-        if (!!response && !!response.value) {
-          options['plugins'] = {
+        if (response?.value) {
+          log('Using default label:', response.value);
+          options.plugins = {
             Label: response.value
           };
         }
 
-        communicator.sendMessage( options );
-
+        log('Sending add torrent request:', options);
+        // Create a callback function to handle the response and show it
+        const handleResponse = (response) => {
+          log('Received response for add torrent request:', response);
+          if (response.error) {
+            warn('Error showing add dialog:', response.error);
+            return;
+          }
+        };
+        safeSendMessage(options, handleResponse);
       });
-
     }
   }
 
   function handle_keydown ( e ) {
     if ( e.ctrlKey ) {
       CONTROL_KEY_DEPRESSED = true;
-    } else {
-      CONTROL_KEY_DEPRESSED = false;
+      log('Control key pressed');
     }
   }
 
   function handle_keyup ( /*e*/ ) {
-    CONTROL_KEY_DEPRESSED = false;
+    if (CONTROL_KEY_DEPRESSED) {
+      log('Control key released');
+    Control_KEY_DEPRESSED = false;
+    }
   }
 
   function handle_contextmenu ( e ) {
-    log( 'RIGHT CLICK', 'CTRL:', CONTROL_KEY_DEPRESSED );
-    // handles the original control + rightclick macro
-    if ( CONTROL_KEY_DEPRESSED ) process_event( e, true );
+    log( 'Processing context menu event' );
+    var torrentUrl = extract_torrent_url(e.target);
+    log('Extracted torrent URL:', torrentUrl);
   }
 
-  function handle_leftclick ( e ) {
-    log( 'LEFT CLICK', 'CTRL:', CONTROL_KEY_DEPRESSED );
-    process_event( e, CONTROL_KEY_DEPRESSED );
+  function handle_leftclick(e) {
+    log('LEFT CLICK', 'CTRL:', CONTROL_KEY_DEPRESSED);
+    
+    // Ignore clicks on the modal itself
+    if (e.target.closest('.delugesiphon-modal')) {
+        log('Click inside modal, ignoring');
+        return;
+    }
+    
+    if (CONTROL_KEY_DEPRESSED) {
+        log('Control + left click detected, processing with options');
+        var torrentUrl = extract_torrent_url(e.target);
+        log('Extracted torrent URL:', torrentUrl);
+        if (torrentUrl) {
+            stopEvent(e);
+            showModal({
+                method: 'addlink-todeluge:withoptions',
+                url: torrentUrl,
+                domain: SITE_META.DOMAIN,
+                info: { name: 'Add Torrent' }
+            }, e);
+        }
+    } else {
+        process_event(e, false);
+    }
   }
 
   function handle_visibilityChange () {
@@ -113,99 +480,349 @@
     }
   }
 
-  function modal_init () {
+  function modal_init() {
+    log('Initializing modal...');
     var modalId = 'delugesiphon-modal-' + chrome.runtime.id;
-    var $modal = $( '#' + modalId );
-    if ( !$modal.length ) {
-      $modal = $( '<div/>', { 'id': modalId } );
+    
+    // Create or get modal container and overlay
+    var modal = document.getElementById(modalId);
+    var overlay = document.getElementById(modalId + '-overlay');
+    
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = modalId;
+        modal.className = 'delugesiphon-modal';
+        document.body.appendChild(modal);
+        
+        overlay = document.createElement('div');
+        overlay.id = modalId + '-overlay';
+        overlay.className = 'delugesiphon-modal-overlay';
+        document.body.appendChild(overlay);
+        
+        log('Created modal container');
     }
-    $( 'body' ).append( $modal );
 
-    // initialize modal.. delgation etc..
-    // Set up modal for options add
-    // submit handler
-    $modal.on( 'submit', 'form', function ( e ) {
-      e.preventDefault();
-
-      var options = $( this ).serializeObject();
-
-      // request download
-      communicator.sendMessage( $.extend( {
-        method: 'addlink-todeluge',
-        domain: SITE_META.DOMAIN
-      }, options ) );
-
-      // // close modal
-      $.modal.close();
-      $modal.removeClass('displayed').html('');
-
-    } );
-
-    // enable/disable move-to location
-    $modal.on( 'change', 'input[name="options[move_completed]"]', function ( /*e*/ ) {
-      $modal.find( 'input[name="options[move_completed_path]"]' ).prop('disabled', !$( this ).is( ':checked' ));
-    } );
-
-    // add/remove falsey hidden field for checkboxes
-    $modal.on( 'change', 'input[type=checkbox]', function ( /*e*/ ) {
-      var $this = $(this),
-        name = $this.attr('name');
-      if ( $this.is( ':checked' ) ) {
-        $modal.find('form input[name="' + name + '"][type="hidden"]').remove();
-      } else {
-        $modal.find('form').append($('<input/>', {type: 'hidden', name: name, value: ''}));
-      }
-    } );
-
-    $modal.on( 'click', 'button[name=cancel]', function ( e ) {
-      e.preventDefault();
-      $.modal.close();
-      $modal.removeClass('displayed').html('');
-    } );
+    // Verify modal exists
+    const addedModal = document.getElementById(modalId);
+    if (!addedModal) {
+        warn('Failed to find modal in DOM after creation');
+        return;
+    }
+    
+    log('Modal initialization complete');
+    return modal;
   }
 
-  function showModal ( req ) {
-
-    log( 'Show Modal', req );
+  function showModal(req, clickEvent) {
+    log('Showing modal with config:', req);
+    
+    // Ensure we have a URL to work with
+    if (!req.url) {
+        warn('No URL provided for modal');
+        return;
+    }
 
     var modalId = 'delugesiphon-modal-' + chrome.runtime.id;
-    var maxZ = Math.max.apply( null,
-      $.map( $( 'body *' ), function ( e/*, n*/ ) {
-        if ( $( e ).css( 'position' ) != 'static' )
-          return parseInt( $( e ).css( 'z-index' ) ) || 1;
-      } ) );
+    var modal = document.getElementById(modalId);
+    var overlay = document.getElementById(modalId + '-overlay');
+    
+    if (!modal) {
+        warn('Modal container not found, initializing...');
+        modal = modal_init();
+        overlay = document.getElementById(modalId + '-overlay');
+        if (!modal) {
+            warn('Failed to initialize modal');
+            return;
+        }
+    }
 
-    // populate modal
-    $( '#' + modalId )
-      .addClass('displayed')
-      .html( modalTmpl.render( $.extend( {}, req ) ) )
-      .modal( {
-        blockerClass: modalId
-      } )
-      .parents( '.jquery-modal.blocker' )
-      .css( 'z-index', ( maxZ || 1 ) + 10 );
+    // Show the modal immediately with loading state
+    modal.innerHTML = `
+        <form action="javascript:void(0);">
+            <h3>${req.info?.name || 'Add Torrent'}</h3>
+            <div class="note">${req.url}</div>
+            <input type="hidden" name="url" value="${req.url}"/>
+            <div class="loading">Loading options...</div>
+        </form>
+    `;
+    
+    // Show the modal and overlay immediately
+    modal.classList.add('displayed');
+    overlay.classList.add('displayed');
+    log('Modal displayed with loading state');
+
+    // Default data structure
+    const defaultData = {
+        plugins: {},
+        defaultLabel: '',
+        config: {
+            add_paused: false,
+            download_location: '',
+            move_completed: false,
+            move_completed_path: ''
+        }
+    };
+
+    // Get plugin info with timeout
+    log('Requesting plugin info...');
+    const pluginInfoPromise = new Promise((resolve, reject) => {
+        const timeoutId = setTimeout(() => {
+            warn('Plugin info request timed out');
+            resolve(defaultData);
+        }, 5000);
+
+        safeSendMessage({
+            method: 'plugins-getinfo'
+        }, function(response) {
+            clearTimeout(timeoutId);
+            log('Plugin info response received:', response);
+            
+            if (!response || response.error) {
+                warn('Plugin info request failed:', response?.error || 'No response');
+                resolve(defaultData);
+                return;
+            }
+
+            // Extract plugins and config from response
+            const { plugins, config } = response.value || {};
+            
+            // Debug plugin info structure
+            log('Plugin info structure:', JSON.stringify(plugins));
+            log('Label plugin data:', JSON.stringify(plugins?.Label));
+            
+            // Get default label
+            log('Processing server response...');
+            resolve({
+                plugins: plugins || {},
+                config: config || defaultData.config,
+                defaultLabel: ''  // We'll get this next
+            });
+        });
+    });
+
+    // Render the modal with whatever data we have after the timeout or successful response
+    pluginInfoPromise.then(data => {
+        // Get default label if we have plugin data
+        if (data.plugins?.Label?.length > 0) {
+            return new Promise(resolve => {
+                safeSendMessage({
+                    method: 'storage-get-default_label'
+                }, function(labelResponse) {
+                    log('Default label response received:', labelResponse);
+                    data.defaultLabel = labelResponse?.value || '';
+                    resolve(data);
+                });
+            });
+        }
+        return data;
+    }).then(data => {
+        log('Final data for rendering:', data);
+        // Ensure plugins structure is correct
+        if (!data.plugins) {
+            data.plugins = {};
+        }
+        if (!data.plugins.Label && Array.isArray(data.plugins.labels)) {
+            // Handle case where labels might be under a different property
+            data.plugins.Label = data.plugins.labels;
+        }
+        renderModalContent(data);
+    }).catch(error => {
+        warn('Error during data loading:', error);
+        renderModalContent(defaultData);
+    });
+
+    function renderModalContent(data) {
+        try {
+            log('Starting modal content render with:', data);
+            
+            modal.innerHTML = `
+                <form action="javascript:void(0);" class="delugesiphon-form">
+                    <h3>${req.info?.name || 'Add Torrent'}</h3>
+                    <div class="note">${req.url}</div>
+                    <input type="hidden" name="url" value="${req.url}"/>
+                    
+                    ${data.plugins?.Label?.length > 0 ? `
+                    <div class="form-group">
+                        <label>Label:</label>
+                        <select name="plugins[Label]">
+                            <option value="">No Label</option>
+                            ${data.plugins.Label.map(label => 
+                                `<option value="${label}" ${label === data.defaultLabel ? 'selected' : ''}>${label}</option>`
+                            ).join('\n')}
+                        </select>
+                    </div>
+                    ` : '<!-- No Label plugin data available -->'}
+
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" name="options[add_paused]" ${data.config?.add_paused ? 'checked' : ''}/>
+                            Add Paused
+                        </label>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Download Location:</label>
+                        <input type="text" name="options[download_location]" value="${data.config?.download_location || ''}" />
+                    </div>
+
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" name="options[move_completed]" ${data.config?.move_completed ? 'checked' : ''}/>
+                            Move Completed
+                        </label>
+                        <input type="text" name="options[move_completed_path]" 
+                               value="${data.config?.move_completed_path || ''}"
+                               ${!data.config?.move_completed ? 'disabled' : ''}/>
+                    </div>
+
+                    <div class="actions">
+                        <button type="button" class="cancel">Cancel</button>
+                        <button type="submit">Add</button>
+                    </div>
+                </form>
+            `;
+            
+            log('Modal content rendered, setting up event listeners...');
+            setupModalEventListeners();
+            log('Modal setup complete');
+            
+        } catch (e) {
+            warn('Error rendering modal content:', e);
+            modal.innerHTML = `
+                <form action="javascript:void(0);" class="delugesiphon-form">
+                    <h3>Add Torrent</h3>
+                    <div class="note">${req.url}</div>
+                    <input type="hidden" name="url" value="${req.url}"/>
+                    <div class="error">Error loading options. The torrent will be added with default settings.</div>
+                    <div class="actions">
+                        <button type="button" class="cancel">Cancel</button>
+                        <button type="submit">Add</button>
+                    </div>
+                </form>
+            `;
+            setupModalEventListeners();
+        }
+    }
+
+    function setupModalEventListeners() {
+        const form = modal.querySelector('form');
+        if (!form) return;
+
+        // Stop propagation of all events within the modal
+        modal.addEventListener('click', function(e) {
+            e.stopPropagation();
+        });
+        
+        // Add form submit handler
+        form.addEventListener('submit', handleFormSubmit);
+
+        // Handle move completed checkbox
+        const moveCompletedCheckbox = form.querySelector('input[name="options[move_completed]"]');
+        const moveCompletedPath = form.querySelector('input[name="options[move_completed_path]"]');
+        if (moveCompletedCheckbox && moveCompletedPath) {
+            moveCompletedCheckbox.addEventListener('change', function() {
+                moveCompletedPath.disabled = !this.checked;
+            });
+        }
+        
+        // Handle cancel button
+        const cancelBtn = form.querySelector('button.cancel');
+        if (cancelBtn) {
+            cancelBtn.addEventListener('click', hideModal);
+        }
+
+        // Handle overlay click
+        overlay.addEventListener('click', hideModal);
+        
+        // Handle escape key
+        const escapeHandler = function(e) {
+            if (e.key === 'Escape') {
+                hideModal();
+            }
+        };
+        document.addEventListener('keydown', escapeHandler);
+        
+        // Store the escape handler for cleanup
+        modal.escapeHandler = escapeHandler;
+    }
+
+    function handleFormSubmit(e) {
+        e.preventDefault();
+        const formData = new FormData(e.target);
+        const data = {
+            method: 'addlink-todeluge',
+            url: formData.get('url'),
+            domain: SITE_META.DOMAIN,
+            options: {},
+            plugins: {}
+        };
+
+        // Process options and plugins
+        for (let [key, value] of formData.entries()) {
+            if (key.startsWith('options[')) {
+                const optionKey = key.match(/options\[(.*?)\]/)[1];
+                data.options[optionKey] = value === 'on' ? true : value;
+            } else if (key.startsWith('plugins[')) {
+                const pluginKey = key.match(/plugins\[(.*?)\]/)[1];
+                if (value) {
+                    data.plugins[pluginKey] = value;
+                }
+            }
+        }
+
+        log('Submitting form data:', data);
+
+        // Save selected label as default if one was chosen
+        if (data.plugins.Label) {
+            safeSendMessage({
+                method: 'storage-set',
+                key: 'default_label',
+                value: data.plugins.Label
+            });
+        }
+
+        // Send the torrent add request
+        safeSendMessage(data, function(response) {
+            if (response?.error) {
+                log('Error adding torrent:', response.error);
+            } else {
+                log('Torrent added successfully');
+                hideModal();
+            }
+        });
+    }
+
+    function hideModal() {
+        log('Hiding modal');
+        modal.classList.remove('displayed');
+        overlay.classList.remove('displayed');
+        
+        // Remove event listeners
+        overlay.removeEventListener('click', hideModal);
+        if (modal.escapeHandler) {
+            document.removeEventListener('keydown', modal.escapeHandler);
+            delete modal.escapeHandler;
+        }
+        
+        // Clear content
+        modal.innerHTML = '';
+    }
   }
 
   function install_configurable_handlers () {
-    /*
-      so, this provides a rudimentary event
-      handler registry.  Following this pattern
-      lets us turn the event handlers on and off on the
-      fly based on a users settings.  Without it they'd
-      have to refresh any open tabs after a config change.
-      */
+    log('Installing configurable handlers');
 
     /* install control + rightclick keyboard macro */
-    communicator.sendMessage( {
+    safeSendMessage({
       method: "storage-get-enable_keyboard_macro"
     }, function ( response ) {
       if ( response.value ) {
-        // if "control + right click" macro enabled
-        registerEventListener( 'keydown', handle_keydown );
-        registerEventListener( 'keyup', handle_keyup );
-        registerEventListener( 'contextmenu', handle_contextmenu );
+        log('Enabling keyboard macro handlers');
+        document.addEventListener( 'keydown', handle_keydown );
+        document.addEventListener( 'keyup', handle_keyup );
+        document.addEventListener( 'contextmenu', handle_contextmenu );
       } else {
-        // disable
+        log('Disabling keyboard macro handlers');
         document.removeEventListener( 'keydown', handle_keydown );
         document.removeEventListener( 'keyup', handle_keyup );
         document.removeEventListener( 'contextmenu', handle_contextmenu );
@@ -213,159 +830,109 @@
     } );
 
     /* install leftclick handling */
-    communicator.sendMessage( {
+    safeSendMessage( {
       method: "storage-get-enable_leftclick"
     }, function ( response ) {
       if ( !!response.value ) {
-        registerEventListener( 'click', handle_leftclick, document.body );
+        log('Enabling left click handler');
+        document.body.addEventListener( 'click', handle_leftclick );
       } else {
+        log('Disabling left click handler');
         document.body.removeEventListener( 'click', handle_leftclick );
       }
     } );
   }
 
-  function site_init () {
-    /*
-      basically this is where per-site changes/hacks etc go when we need to add support
-      for specific sites.  RIP TVTorrents' weird code.
-      */
-    log('<<<<< SITE INIT >>>>>');
-    // get regex for link checking from settings
-    communicator.sendMessage( {
+  function site_init() {
+    if (!communicator._Connected) {
+      warn('Cannot initialize site - communicator not connected');
+      return;
+    }
+
+    log('Initializing site functionality');
+    
+    // Initialize the modal container
+    modal_init();
+    
+    // Set default regex if none provided
+    const defaultRegex = '^magnet:|(\\/|^)(torrent|torrents|dl|download|get)(\\.php)?(?=.*action=download|\\.torrent)|(\\/|^)(index|download)(\\.php)?(\\&|\\?|\\/)(?=.*torrent)|\\.torrent';
+    
+    // Get regex for link checking from settings
+    safeSendMessage({
       method: 'storage-get-link_regex'
-    }, function ( response ) {
-      // if there's an override..
-
-      log('GET LINK REGEX', response.value);
-      if ( !!response.value ) {
-        SITE_META.TORRENT_REGEX = response.value;
+    }, function(response) {
+      if (!response) {
+        warn('No response from link regex request, using default');
+        SITE_META.TORRENT_REGEX = defaultRegex;
+        install_configurable_handlers();
+        return;
       }
+      
+      log('Link regex configuration:', response);
+      
+      // Use provided regex or fall back to default
+      SITE_META.TORRENT_REGEX = response.value || defaultRegex;
+      log('Using torrent regex pattern:', SITE_META.TORRENT_REGEX);
 
-      // check if settings have changed and adjust handlers accordingly
-      install_configurable_handlers();
-
-    }, function ( /*exc*/ ) {
-
-      // treat this as a heartbeat.  on failure, close up shop (background page went away)
-
-      document.removeEventListener( 'keydown', handle_keydown );
-      document.removeEventListener( 'keyup', handle_keyup );
-      document.removeEventListener( 'contextmenu', handle_contextmenu );
-      document.body.removeEventListener( 'click', handle_leftclick );
-      console.error('Background page went away');
-    } );
+      // Check if we're on Deluge UI before installing handlers
+      safeSendMessage({
+        method: 'storage-get-connections'
+      }, function(response) {
+        try {
+          var conns = response.value || [];
+          var currentUrl = new URL(window.location.href);
+          var currentPathname = currentUrl.pathname.replace(/\/$/, "");
+          
+        for (var i = 0, l = conns.length; i < l; i++) {
+            try {
+              var connUrl = new URL(conns[i].url);
+          var connPathname = connUrl.pathname.replace(/\/$/, "");
+              
+              if (currentUrl.hostname === connUrl.hostname && currentPathname === connPathname) {
+                warn('On Deluge web UI page - not installing handlers');
+                return;
+              }
+            } catch (e) {
+              warn('Error parsing connection URL:', e);
+              continue;
+            }
+          }
+          
+          // Not on Deluge UI, install handlers
+          install_configurable_handlers();
+        } catch (e) {
+          warn('Error checking Deluge UI:', e);
+          // Install handlers anyway if check fails
+          install_configurable_handlers();
+        }
+      });
+    });
   }
 
-  var modalTmpl = $.templates(
-    '<form action="javascript:void(0);">' +
-
-    '<h3> {{:info.name}} </h3>' +
-
-    '<div class="note"> {{>url}} </div>' +
-    '<input type="hidden" value="{{>url}}" name="url"/>' +
-
-    '<div>' +
-    '<label for="download_location">download to:</label>' +
-    '<input type="text" value="{{>config.download_location}}" name="options[download_location]">' +
-    '</div>' +
-
-
-    '<div>' +
-    '<label for="move_completed">move completed:</label>' +
-    '<input type="checkbox" {{if config.move_completed}}checked="checked"{{/if}} value="true" name="options[move_completed]">' +
-    ' ' +
-    '<input {{if !config.move_completed }}disabled="disabled"{{/if}} type="text" value="{{>config.move_completed_path}}" name="options[move_completed_path]">' +
-    '</div>' +
-
-    '<div>' +
-    '<label for="add_paused">add paused:</label>' +
-    '<input type="checkbox" {{if config.add_paused}}checked="checked"{{/if}} value="true" name="options[add_paused]">' +
-    '</div>' +
-
-    '{{if plugins.Label && plugins.Label.length}}' +
-    '<div class="plugin">' +
-    '<label for="label">label:</label>' +
-    '<select name="plugins[Label]">' +
-    '<option value="">-----</option>' +
-    '{{for plugins.Label}}' +
-    '<option value="{{>#data}}">{{>#data}}</option>' +
-    '{{/for}}' +
-    '</select>' +
-    '</div>' +
-    '{{/if}}' +
-
-    '<div class="buttons">' +
-    '<input type="submit" value="Add" name="submit"/> ' +
-    '<button name="cancel">Cancel</button>' +
-    '</div>' +
-
-    '</form>'
-  );
-
-  /* MAIN */
-  communicator
-    .observeConnect( function () {
-
-      // don't turn on if we're on our deluge page..
-      communicator.sendMessage( {
-        method: 'storage-get-connections'
-      }, function ( response ) {
-        var conns = response.value || [],
-          currentUrl = new URL(window.location.href),
-          currentPathname = currentUrl.pathname.replace(/\/$/, "");
-        for (var i = 0, l = conns.length; i < l; i++) {
-          var connUrl = {pathname: ''};
-          try { connUrl = new URL(conns[i].url); } catch (e) {}  // eslint-disable-line no-empty
-          var connPathname = connUrl.pathname.replace(/\/$/, "");
-          if (currentUrl.hostname == connUrl.hostname && currentPathname == connPathname) {
-            log('[delugesiphon] not initializing on web ui page');
-            return; // donesky
-          }
-        }
-
-        // else continue
-
-        // logging ...
-        communicator.sendMessage( {
-          method: 'storage-get-enable_debug_logging'
-        }, function ( response ) {
-          if ( !!response.value ) {
-            log = function () {
-              console.log.apply( console, [ '[delugesiphon]', '[' + document.URL + ']' ].concat( Array.prototype.slice.call( arguments ) ) );
-            };
-            log( 'Debug logging enabled' );
-          }
-
-          // watch for tab changes
-          registerEventListener( 'webkitvisibilitychange', handle_visibilityChange );
-
-          // site specific init..
-          site_init();
-
-          // modal init
-          modal_init();
-
-          // listen for messages from the background
-          communicator.observeMessage( function ( req/*, sendResponse*/ ) {
-
-            log( 'RECV CONTENT MSG', req );
-
-            if ( req.method === "add_dialog" ) {
-
-              showModal( req );
-
-            }
-          } );
-
-          // done
-          log( 'INITIALIZED delugesiphon [' + chrome.runtime.id + ']' );
-
-        } );
+  // Start initialization immediately and also set up for document ready
+  initialize().catch(e => {
+    warn('Initial initialization failed:', e);
+    if (document.readyState !== 'complete') {
+      log('Document not ready, will retry on DOMContentLoaded');
+      document.addEventListener('DOMContentLoaded', () => {
+        log('DOMContentLoaded fired, retrying initialization');
+        initialize();
       });
-    } )
-    .observeDisconnect( function () {
-      log( '[delugesiphon] Lost connection to background page (probably because it was reloaded). Please refresh this page.' );
-    } )
-    .init( !!chrome.runtime.id );
-
-}( window, document ));
+    }
+  });
+  
+  // Re-initialize when the page becomes visible, but only if we're not already connected
+  document.addEventListener('webkitvisibilitychange', function() {
+    log('Visibility changed:', {
+      hidden: document.webkitHidden,
+      state: document.webkitVisibilityState
+    });
+    if (!document.webkitHidden && document.webkitVisibilityState !== 'prerender' && (!communicator || !communicator._Connected)) {
+      log('Page became visible and not connected, reinitializing');
+      initialize();
+    }
+  });
+  
+  log('Content handler setup complete');
+  
+} )( window, document );
