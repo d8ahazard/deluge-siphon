@@ -35,7 +35,7 @@
   };
 
   const warn = function (...args) {
-    console.warn('[delugesiphon]', `[${SITE_META.DOMAIN}]`, ...args);
+    console.log('[delugesiphon]', `[${SITE_META.DOMAIN}]`, ...args);
   };
 
   // Verify communicator is available

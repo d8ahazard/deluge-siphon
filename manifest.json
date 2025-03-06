@@ -30,12 +30,7 @@
     "notifications",
     "storage"
   ],
-  "host_permissions": [
-    "http://*/*",
-    "https://*/*",
-    "ftp://*/*",
-    "file://*/*"
-  ],
+  "host_permissions": ["<all_urls>"],
   "content_scripts": [{
     "all_frames": true,
     "matches": [
