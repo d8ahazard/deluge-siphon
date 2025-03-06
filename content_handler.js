@@ -56,6 +56,8 @@
 
   // Safe message sender that queues messages when disconnected
   function safeSendMessage(message, callback) {
+    log('Attempting to send message:', message);
+    
     if (!communicator || !communicator._Connected) {
       warn('Connection not available, queueing message:', message);
       messageQueue.push({ message, callback });
@@ -66,7 +68,13 @@
     }
 
     try {
-      communicator.sendMessage(message, callback, function(error) {
+      log('Sending message via communicator:', message);
+      communicator.sendMessage(message, function(response) {
+        log('Received response from background:', response);
+        if (callback) {
+          callback(response);
+        }
+      }, function(error) {
         warn('Message send failed:', error);
         messageQueue.push({ message, callback });
         if (!isReconnecting) {
@@ -274,14 +282,8 @@
       // Initialize modal container
       modal_init();
       
-      // Notify background page that content script is ready
-      safeSendMessage({ 
-        method: 'content-script-ready',
-        domain: SITE_META.DOMAIN,
-        regex: SITE_META.TORRENT_REGEX
-      }, function(response) {
-        log('Background page notified of content script ready:', response);
-      });
+      // Initialize toast notification system
+      initToastSystem();      
       
       log('Initialization complete');
     } catch (e) {
@@ -413,16 +415,51 @@
           };
         }
 
+        // Show a loading toast
+        const loadingToastId = showToast('Adding torrent to Deluge...', 'info', 0);
+
         log('Sending add torrent request:', options);
         // Create a callback function to handle the response and show it
         const handleResponse = (response) => {
           log('Received response for add torrent request:', response);
-          if (response.error) {
-            warn('Error showing add dialog:', response.error);
+          
+          // Remove the loading toast
+          removeToast(loadingToastId);
+          
+          if (!response) {
+            warn('No response received from background script');
+            showToast('Error adding torrent: No response from server', 'error', 5000);
             return;
           }
+          
+          if (response.error) {
+            warn('Error adding torrent:', response.error);
+            showToast(`Error adding torrent: ${response.error}`, 'error', 5000);
+          } else {
+            // Build success message with details
+            let successMsg = 'Torrent added successfully';
+            
+            // Add label info if available
+            if (options.plugins?.Label) {
+              successMsg += ` with label "${options.plugins.Label}"`;
+            }
+            
+            // Show success toast
+            showToast(successMsg, 'success', 5000);
+          }
         };
-        safeSendMessage(options, handleResponse);
+        
+        // Send request with a 30 second timeout
+        const timeoutId = setTimeout(() => {
+          warn('Timeout waiting for torrent add response');
+          removeToast(loadingToastId);
+          showToast('Error adding torrent: Request timed out', 'error', 5000);
+        }, 30000);
+        
+        safeSendMessage(options, (response) => {
+          clearTimeout(timeoutId);
+          handleResponse(response);
+        });
       });
     }
   }
@@ -495,7 +532,7 @@
         document.body.appendChild(modal);
         
         overlay = document.createElement('div');
-        overlay.id = modalId + '-overlay';
+        overlay.id = 'delugesiphon-backdrop-' + chrome.runtime.id;
         overlay.className = 'delugesiphon-modal-overlay';
         document.body.appendChild(overlay);
         
@@ -524,12 +561,12 @@
 
     var modalId = 'delugesiphon-modal-' + chrome.runtime.id;
     var modal = document.getElementById(modalId);
-    var overlay = document.getElementById(modalId + '-overlay');
+    var overlay = document.getElementById("delugesiphon-backdrop-" + chrome.runtime.id);
     
     if (!modal) {
         warn('Modal container not found, initializing...');
         modal = modal_init();
-        overlay = document.getElementById(modalId + '-overlay');
+        overlay = document.getElementById("delugesiphon-backdrop-" + chrome.runtime.id);
         if (!modal) {
             warn('Failed to initialize modal');
             return;
@@ -652,6 +689,23 @@
                         </select>
                     </div>
                     ` : '<!-- No Label plugin data available -->'}
+                    
+                    ${data.plugins?.AutoAdd?.length > 0 ? `
+                    <div class="form-group">
+                        <label>Watch Directory:</label>
+                        <select name="plugins[AutoAdd]">
+                            <option value="">Default Location</option>
+                            ${data.plugins.AutoAdd.map(path => 
+                                `<option value="${path}">${path}</option>`
+                            ).join('\n')}
+                        </select>
+                    </div>
+                    ` : ''}
+
+                    <div class="form-group">
+                        <label>Download Location:</label>
+                        <input type="text" name="options[download_location]" value="${data.config?.download_location || ''}"/>
+                    </div>
 
                     <div class="form-group">
                         <label>
@@ -659,22 +713,21 @@
                             Add Paused
                         </label>
                     </div>
-
-                    <div class="form-group">
-                        <label>Download Location:</label>
-                        <input type="text" name="options[download_location]" value="${data.config?.download_location || ''}" />
-                    </div>
-
+                    
                     <div class="form-group">
                         <label>
                             <input type="checkbox" name="options[move_completed]" ${data.config?.move_completed ? 'checked' : ''}/>
-                            Move Completed
+                            Move on Completion
                         </label>
-                        <input type="text" name="options[move_completed_path]" 
-                               value="${data.config?.move_completed_path || ''}"
-                               ${!data.config?.move_completed ? 'disabled' : ''}/>
                     </div>
 
+                    ${data.config?.move_completed ? `
+                    <div class="form-group">
+                        <label>Move Completed To:</label>
+                        <input type="text" name="options[move_completed_path]" value="${data.config?.move_completed_path || ''}"/>
+                    </div>
+                    ` : ''}
+                    
                     <div class="actions">
                         <button type="button" class="cancel">Cancel</button>
                         <button type="submit">Add</button>
@@ -684,8 +737,17 @@
             
             log('Modal content rendered, setting up event listeners...');
             setupModalEventListeners();
-            log('Modal setup complete');
             
+            // Show/hide move completed path field based on checkbox
+            const moveCompletedCheck = modal.querySelector('input[name="options[move_completed]"]');
+            if (moveCompletedCheck) {
+                moveCompletedCheck.addEventListener('change', function() {
+                    const pathGroup = modal.querySelector('input[name="options[move_completed_path]"]')?.closest('.form-group');
+                    if (pathGroup) {
+                        pathGroup.style.display = this.checked ? 'block' : 'none';
+                    }
+                });
+            }
         } catch (e) {
             warn('Error rendering modal content:', e);
             modal.innerHTML = `
@@ -693,7 +755,9 @@
                     <h3>Add Torrent</h3>
                     <div class="note">${req.url}</div>
                     <input type="hidden" name="url" value="${req.url}"/>
-                    <div class="error">Error loading options. The torrent will be added with default settings.</div>
+                    <div class="form-group">
+                        <label>Error loading options. Add anyway?</label>
+                    </div>
                     <div class="actions">
                         <button type="button" class="cancel">Cancel</button>
                         <button type="submit">Add</button>
@@ -702,6 +766,8 @@
             `;
             setupModalEventListeners();
         }
+        
+        log('Modal setup complete');
     }
 
     function setupModalEventListeners() {
@@ -748,6 +814,10 @@
 
     function handleFormSubmit(e) {
         e.preventDefault();
+        
+        // Close modal immediately
+        hideModal();
+        
         const formData = new FormData(e.target);
         const data = {
             method: 'addlink-todeluge',
@@ -781,13 +851,35 @@
             });
         }
 
+        // Show a loading toast
+        const loadingToastId = showToast('Adding torrent to Deluge...', 'info', 0);
+
         // Send the torrent add request
         safeSendMessage(data, function(response) {
+            // Remove the loading toast
+            removeToast(loadingToastId);
+            
             if (response?.error) {
                 log('Error adding torrent:', response.error);
+                showToast(`Error adding torrent: ${response.error}`, 'error', 5000);
             } else {
                 log('Torrent added successfully');
-                hideModal();
+                
+                // Build success message with details
+                let successMsg = 'Torrent added successfully';
+                
+                // Add label info if available
+                if (data.plugins.Label) {
+                    successMsg += ` with label "${data.plugins.Label}"`;
+                }
+                
+                // Add paused state if set
+                if (data.options.add_paused) {
+                    successMsg += ' (paused)';
+                }
+                
+                // Show success toast
+                showToast(successMsg, 'success', 5000);
             }
         });
     }
@@ -935,4 +1027,86 @@
   
   log('Content handler setup complete');
   
+  // Toast notification system
+  function initToastSystem() {
+    // Create container if it doesn't exist
+    let toastContainer = document.querySelector('.delugesiphon-toast-container');
+    if (!toastContainer) {
+      toastContainer = document.createElement('div');
+      toastContainer.className = 'delugesiphon-toast-container';
+      document.body.appendChild(toastContainer);
+    }
+    
+    // Store reference for later use
+    window.delugesiphonToastContainer = toastContainer;
+  }
+
+  // Show a toast notification
+  function showToast(message, type = 'info', duration = 5000) {
+    if (!window.delugesiphonToastContainer) {
+      initToastSystem();
+    }
+    
+    // Generate unique ID for this toast
+    const toastId = 'toast-' + Date.now() + '-' + Math.floor(Math.random() * 1000);
+    
+    // Create icons based on type
+    const icons = {
+      success: '✓',
+      error: '✗',
+      warning: '⚠',
+      info: 'ℹ'
+    };
+    
+    // Create toast element
+    const toast = document.createElement('div');
+    toast.className = `delugesiphon-toast ${type}`;
+    toast.id = toastId;
+    toast.style.opacity = '1'; // Ensure it's visible
+    toast.style.transform = 'translateX(0)'; // Start in correct position
+    toast.innerHTML = `
+      <div class="delugesiphon-toast-icon">${icons[type] || icons.info}</div>
+      <div class="delugesiphon-toast-content">${message}</div>
+      <div class="delugesiphon-toast-close">×</div>
+    `;
+    
+    // Add to container
+    window.delugesiphonToastContainer.appendChild(toast);
+    
+    // Set up close button
+    const closeBtn = toast.querySelector('.delugesiphon-toast-close');
+    if (closeBtn) {
+      closeBtn.addEventListener('click', () => {
+        removeToast(toastId);
+      });
+    }
+    
+    // Auto-remove after duration
+    if (duration > 0) {
+      setTimeout(() => {
+        removeToast(toastId);
+      }, duration);
+    }
+    
+    // Log toast
+    log('Toast notification shown:', { message, type, duration });
+    
+    return toastId;
+  }
+
+  // Remove a toast by ID
+  function removeToast(toastId) {
+    const toast = document.getElementById(toastId);
+    if (!toast) return;
+    
+    // Add the remove class to trigger the slide-out animation
+    toast.classList.add('remove');
+    
+    // Remove element after animation completes
+    setTimeout(() => {
+      if (toast.parentNode) {
+        toast.parentNode.removeChild(toast);
+      }
+    }, 300);
+  }
 } )( window, document );
