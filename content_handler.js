@@ -383,85 +383,6 @@
     
     log('Processing torrent URL:', torrent_url, 'with options:', with_options);
     stopEvent(e);
-
-    if (with_options) {
-      log('Requesting add dialog');
-      safeSendMessage({
-        method: 'addlink-todeluge:withoptions',
-        url: torrent_url,
-        domain: SITE_META.DOMAIN
-      }, function(response) {
-        log('Received response for add dialog request:', response);
-        if (response.error) {
-          warn('Error showing add dialog:', response.error);
-          return;
-        }
-        showModal(response);
-      });
-    } else {
-      safeSendMessage({
-        method: "storage-get-default_label"
-      }, function(response) {
-        var options = {
-          method: 'addlink-todeluge',
-          url: torrent_url,
-          domain: SITE_META.DOMAIN
-        };
-
-        if (response?.value) {
-          log('Using default label:', response.value);
-          options.plugins = {
-            Label: response.value
-          };
-        }
-
-        // Show a loading toast
-        const loadingToastId = showToast('Adding torrent to Deluge...', 'info', 0);
-
-        log('Sending add torrent request:', options);
-        // Create a callback function to handle the response and show it
-        const handleResponse = (response) => {
-          log('Received response for add torrent request:', response);
-          
-          // Remove the loading toast
-          removeToast(loadingToastId);
-          
-          if (!response) {
-            warn('No response received from background script');
-            showToast('Error adding torrent: No response from server', 'error', 5000);
-            return;
-          }
-          
-          if (response.error) {
-            warn('Error adding torrent:', response.error);
-            showToast(`Error adding torrent: ${response.error}`, 'error', 5000);
-          } else {
-            // Build success message with details
-            let successMsg = 'Torrent added successfully';
-            
-            // Add label info if available
-            if (options.plugins?.Label) {
-              successMsg += ` with label "${options.plugins.Label}"`;
-            }
-            
-            // Show success toast
-            showToast(successMsg, 'success', 5000);
-          }
-        };
-        
-        // Send request with a 30 second timeout
-        const timeoutId = setTimeout(() => {
-          warn('Timeout waiting for torrent add response');
-          removeToast(loadingToastId);
-          showToast('Error adding torrent: Request timed out', 'error', 5000);
-        }, 30000);
-        
-        safeSendMessage(options, (response) => {
-          clearTimeout(timeoutId);
-          handleResponse(response);
-        });
-      });
-    }
   }
 
   function handle_keydown ( e ) {
@@ -921,6 +842,18 @@
       }
     } );
 
+    /* send a test message to get the cookies */
+    safeSendMessage( {
+      action: "getCookies",
+      url: window.location.href
+    }, function ( response ) {
+      if (response?.cookies) {
+        log('Cookies received:', response.cookies);
+      } else if (response?.error) {
+        warn('Error getting cookies:', response.error);
+      }
+    } );
+    
     /* install leftclick handling */
     safeSendMessage( {
       method: "storage-get-enable_leftclick"

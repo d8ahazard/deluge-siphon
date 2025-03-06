@@ -189,11 +189,7 @@ DelugeConnection.prototype.addTorrent = function(url, cookie_domain, plugins, op
   
   return this._connect()
     .then(() => {
-      console.log('[addTorrent] Connected, getting cookies...');
-      return this._getDomainCookies(url, cookie_domain);
-    })
-    .then(() => {
-      console.log('[addTorrent] Got cookies, adding torrent...');
+      console.log('[addTorrent] Connected, adding torrent...');
       return this._addTorrentUrlToServer(url, options, cookie_domain);
     })
     .then((torrentId) => {
@@ -457,7 +453,6 @@ DelugeConnection.prototype._getDomainCookies = function(url, cookie_domain) {
 
       try {
         const hostname = new URL(url).hostname;
-        // Remove any leading dots from cookie_domain for comparison
         const cleanCookieDomain = cookie_domain?.replace(/^\./, '');
         if (!cleanCookieDomain || !hostname.endsWith(cleanCookieDomain)) {
           console.log('_getDomainCookies', cookie_domain, '!=', hostname);
@@ -465,107 +460,65 @@ DelugeConnection.prototype._getDomainCookies = function(url, cookie_domain) {
           return;
         }
 
-        // Get cookies for all possible domain variants:
-        // 1. Exact domain
-        // 2. Domain with leading dot
-        // 3. Domain parts (for subdomains)
-        const domains = new Set([cookie_domain]);
-        
-        // Add dot-prefixed version if not already present
-        if (!cookie_domain.startsWith('.')) {
-          domains.add('.' + cookie_domain);
-        }
-        
-        // Add domain parts for subdomain cookies
-        const parts = cleanCookieDomain.split('.');
-        for (let i = 1; i < parts.length - 1; i++) {
-          const parentDomain = parts.slice(i).join('.');
-          domains.add(parentDomain);
-          domains.add('.' + parentDomain);
-        }
+        console.log('_getDomainCookies', 'Fetching cookies for domain:', cookie_domain);
 
-        console.log('_getDomainCookies', 'Fetching cookies for domains:', Array.from(domains));
+        communicator.sendMessage(
+          { action: "getCookies", url: url },
+          (response) => {
+            if (response.error) {
+              console.error("Error getting cookies:", response.error);
+              resolve('');
+              return;
+            }
 
-        // Get cookies for all domain variants
-        Promise.all(Array.from(domains).map(domain => 
-          new Promise(resolveInner => {
-            chrome.cookies.getAll({ domain }, cookies => {
-              const validCookies = (cookies || []).filter(cookie => {
-                // Only include cookies that:
-                // 1. Match our domain or its subdomains
-                const cookieDomainMatches = cookie.domain.replace(/^\./, '') === cleanCookieDomain ||
-                                          cleanCookieDomain.endsWith('.' + cookie.domain.replace(/^\./, ''));
-                return cookieDomainMatches;
+            if (response.cookies) {
+              const cookies = Object.values(response.cookies).map(value => ({name:Object.keys(response.cookies).find(key => response.cookies[key] === value), value:value, domain: cookie_domain}));
+
+              // Process cookies based on domain specificity
+              const cookiesByName = {};
+              cookies.forEach(cookie => {
+                const name = cookie.name;
+                const currentCookie = cookiesByName[name];
+                let score = 0;
+                const domain = cookie.domain.replace(/^\./, '');
+
+                if (domain === cleanCookieDomain) {
+                  score = 4;
+                } else if (cookie.domain === '.' + cleanCookieDomain) {
+                  score = 3;
+                } else if (cleanCookieDomain.endsWith('.' + domain)) {
+                  score = 2;
+                } else if (cookie.domain.startsWith('.') && cleanCookieDomain.endsWith(domain)) {
+                  score = 1;
+                }
+
+                if (!currentCookie || score > currentCookie.score) {
+                  cookiesByName[name] = {
+                    cookie,
+                    score
+                  };
+                }
               });
-              console.log('_getDomainCookies', 'Found cookies:', validCookies, 'for domain:', domain);
-              resolveInner(validCookies);
-            });
-          })
-        )).then(cookieArrays => {
-          // First, collect all cookies by name, keeping track of their domain specificity
-          const cookiesByName = {};
-          
-          // Flatten and process all cookies
-          cookieArrays.flat().forEach(cookie => {
-            const name = cookie.name;
-            const currentCookie = cookiesByName[name];
-            
-            // Calculate domain specificity score
-            // Higher score = more specific domain
-            let score = 0;
-            const domain = cookie.domain.replace(/^\./, '');
-            
-            // Most specific match gets highest score
-            if (domain === cleanCookieDomain) {
-              score = 4;
-            } 
-            // Next most specific is dot-prefixed exact domain
-            else if (cookie.domain === '.' + cleanCookieDomain) {
-              score = 3;
-            }
-            // Parent domain exact match
-            else if (cleanCookieDomain.endsWith('.' + domain)) {
-              score = 2;
-            }
-            // Dot-prefixed parent domain
-            else if (cookie.domain.startsWith('.') && cleanCookieDomain.endsWith(domain)) {
-              score = 1;
-            }
 
-            // Log the cookie we're processing
-            console.log('Processing cookie:', {
-              name: cookie.name,
-              domain: cookie.domain,
-              score,
-              secure: cookie.secure,
-              httpOnly: cookie.httpOnly,
-              sameSite: cookie.sameSite
-            });
+              const cookieString = Object.values(cookiesByName)
+                .map(({ cookie }) => `${cookie.name}=${cookie.value}`)
+                .join('; ');
 
-            // Only replace if we don't have this cookie yet or if this one is more specific
-            if (!currentCookie || score > currentCookie.score) {
-              cookiesByName[name] = {
-                cookie,
-                score
-              };
+              if (!cookieString) {
+                console.log('_getDomainCookies', 'No valid cookies found');
+                resolve('');
+                return;
+              }
+
+              COOKIES[cookie_domain] = cookieString;
+              console.log('_getDomainCookies', 'Final cookies:', Object.keys(cookiesByName));
+              resolve(cookieString);
+
+            } else {
+              resolve('');
             }
-          });
-
-          // Convert the collected cookies into a string
-          const cookieString = Object.values(cookiesByName)
-            .map(({ cookie }) => `${cookie.name}=${cookie.value}`)
-            .join('; ');
-
-          if (!cookieString) {
-            console.log('_getDomainCookies', 'No valid cookies found');
-            resolve('');
-            return;
           }
-
-          COOKIES[cookie_domain] = cookieString;
-          console.log('_getDomainCookies', 'Final cookies:', Object.keys(cookiesByName));
-          resolve(cookieString);
-        });
+        );
 
       } catch (e) {
         console.error('_getDomainCookies error:', e);
@@ -574,7 +527,6 @@ DelugeConnection.prototype._getDomainCookies = function(url, cookie_domain) {
     });
   });
 };
-
 DelugeConnection.prototype._getSession = function() {
   console.log('[_getSession] Checking if session is valid');
   
@@ -807,8 +759,7 @@ DelugeConnection.prototype._connectDaemon = function(daemon_info) {
         .then(resolve)
         .catch(reject);
     }, 5000);
-});
-};
+})};
 
 DelugeConnection.prototype._getServerConfig = function() {
   console.log('_getServerConfig');
@@ -1015,10 +966,6 @@ DelugeConnection.prototype._getLabelsWithFallbacks = function() {
 DelugeConnection.prototype._addTorrentUrlToServer = function(url, options, cookie_domain) {
     console.log('[_addTorrentUrlToServer] Starting with:', url, options, cookie_domain);
     
-    // Form the request parameters
-    const cookieHeader = cookie_domain && COOKIES[cookie_domain] ? COOKIES[cookie_domain] : '';
-    console.log('[_addTorrentUrlToServer] Cookie header:', cookie_domain, cookieHeader ? 'Cookie exists' : 'No cookie');
-    
     // Build parameter object with correct structure for Deluge
     let params = {};
     
@@ -1043,7 +990,7 @@ DelugeConnection.prototype._addTorrentUrlToServer = function(url, options, cooki
         
         // Add any additional options that were passed
         Object.entries(options).forEach(([key, value]) => {
-            if (!params.hasOwnProperty(key)) {
+            if (!params.hasOwnProperty(key) && key !== 'pageCookies') {
                 params[key] = value;
             }
         });
@@ -1060,48 +1007,68 @@ DelugeConnection.prototype._addTorrentUrlToServer = function(url, options, cooki
     // For non-magnet URLs, check if we should send cookies
     return new Promise((resolve, reject) => {
         chrome.storage.local.get('send_cookies', data => {
-            // If send_cookies is enabled (default true) and we have cookies, add them to params
-            if (data.send_cookies !== false && cookieHeader) {
-                params.cookie = cookieHeader;
+            // If send_cookies is disabled, proceed without cookies
+            if (data.send_cookies === false) {
+                console.log('[_addTorrentUrlToServer] Cookie sending disabled');
+                this._addTorrentViaUrl(encodedUrl, params)
+                    .then(resolve)
+                    .catch(reject);
+                return;
             }
-            
-            // Try direct URL method first
-            console.log('[_addTorrentUrlToServer] Trying direct URL method with params:', {
-                url: encodedUrl,
-                hasCookies: !!params.cookie
-            });
-            
-            this._addTorrentViaUrl(encodedUrl, params)
-                .then(resolve)
-                .catch(error => {
-                    console.warn('[_addTorrentUrlToServer] Direct URL method failed:', error);
-                    
-                    // If we got a 403 and have cookies, try downloading the torrent directly
-                    if (error.code === 403 && cookieHeader) {
-                        console.log('[_addTorrentUrlToServer] Got 403 with cookies, attempting direct download');
-                        this._downloadTorrent(encodedUrl, cookie_domain)
-                            .then(torrentData => {
-                                return this._request('addtorrent-file', {
-                                    method: 'core.add_torrent_file',
-                                    params: ['temp.torrent', torrentData, params],
-                                    id: '-17004.' + Date.now()
-                                });
-                            })
-                            .then(payload => {
-                                if (payload.error) {
-                                    throw new Error(payload.error.message || 'Failed to add torrent file');
-                                }
-                                resolve(payload.result);
-                            })
-                            .catch(downloadError => {
-                                console.error('[_addTorrentUrlToServer] Both methods failed:', downloadError);
-                                // Combine error messages to be more informative
-                                reject(new Error('Unable to add torrent: Direct access failed (403) and download attempt failed. The site may require authentication or cookies.'));
-                            });
-                    } else {
-                        reject(error);
+
+            // Get cookies from controller_communicator
+            console.log('[_addTorrentUrlToServer] Requesting cookies from controller_communicator');
+            communicator.sendMessage({ action: "getCookies", url: encodedUrl }, (response) => {
+                if (response && response.cookies) {
+                    // Convert cookies object to cookie string
+                    const cookieString = Object.entries(response.cookies)
+                        .map(([name, value]) => `${name}=${value}`)
+                        .join('; ');
+
+                    if (cookieString) {
+                        console.log('[_addTorrentUrlToServer] Adding cookies to request');
+                        params.cookie = cookieString;
                     }
+                }
+
+                // Try direct URL method first
+                console.log('[_addTorrentUrlToServer] Trying direct URL method with params:', {
+                    url: encodedUrl,
+                    hasCookies: !!params.cookie
                 });
+                
+                this._addTorrentViaUrl(encodedUrl, params)
+                    .then(resolve)
+                    .catch(error => {
+                        console.warn('[_addTorrentUrlToServer] Direct URL method failed:', error);
+                        
+                        // If we got a 403 and have cookies, try downloading the torrent directly
+                        if (error.code === 403 && params.cookie) {
+                            console.log('[_addTorrentUrlToServer] Got 403 with cookies, attempting direct download');
+                            this._downloadTorrent(encodedUrl, cookie_domain)
+                                .then(torrentData => {
+                                    return this._request('addtorrent-file', {
+                                        method: 'core.add_torrent_file',
+                                        params: ['temp.torrent', torrentData, params],
+                                        id: '-17004.' + Date.now()
+                                    });
+                                })
+                                .then(payload => {
+                                    if (payload.error) {
+                                        throw new Error(payload.error.message || 'Failed to add torrent file');
+                                    }
+                                    resolve(payload.result);
+                                })
+                                .catch(downloadError => {
+                                    console.error('[_addTorrentUrlToServer] Both methods failed:', downloadError);
+                                    // Combine error messages to be more informative
+                                    reject(new Error('Unable to add torrent: Direct access failed (403) and download attempt failed. The site may require authentication or cookies.'));
+                                });
+                        } else {
+                            reject(error);
+                        }
+                    });
+            });
         });
     });
 };
@@ -1286,7 +1253,6 @@ communicator
     const method = parts.join('-');
 
     console.log('Processing message:', prefix, method, request);
-
     if (request.method === "settings-changed") {
       console.log('~~~ MESSAGE ~~~ Settings Changed');
       delugeConnection._initState().then(() => {
@@ -1618,6 +1584,3 @@ chrome.runtime.onInstalled.addListener(install => {
   const manifest = chrome.runtime.getManifest();
   console.log('[INSTALLED: ' + manifest.version + ']', install);
 });
-
-/* Daemon methods */
-

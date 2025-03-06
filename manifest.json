@@ -28,17 +28,13 @@
     "cookies",
     "contextMenus",
     "notifications",
-    "storage"
+    "storage",
+    "tabs"
   ],
   "host_permissions": ["<all_urls>"],
   "content_scripts": [{
     "all_frames": true,
-    "matches": [
-      "http://*/*", 
-      "https://*/*", 
-      "ftp://*/*",
-      "file://*/*"
-    ], 
+    "matches": ["<all_urls>"], 
     "js": [
       "lib/utils.js", 
       "lib/controller_communicator.js", 
