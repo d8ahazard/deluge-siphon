@@ -1,6 +1,47 @@
 /* global stopEvent, communicator, chrome, registerEventListener */
 ( function ( window, document ) {
   console.log('[delugesiphon] Content handler script loaded');
+  let cookies = {};
+  
+  // Queue for messages that need to be sent when connection is restored
+  let messageQueue = [];
+  let isReconnecting = false;
+
+  // Safe message sender that queues messages when disconnected
+  function safeSendMessage(message, callback) {
+    log('Attempting to send message:', message);
+    
+    if (!communicator || !communicator._Connected) {
+      warn('Connection not available, queueing message:', message);
+      messageQueue.push({ message, callback });
+      if (!isReconnecting) {
+        reconnect();
+      }
+      return;
+    }
+
+    try {
+      log('Sending message via communicator:', message);
+      communicator.sendMessage(message, function(response) {
+        log('Received response from background:', response);
+        if (callback) {
+          callback(response);
+        }
+      }, function(error) {
+        warn('Message send failed:', error);
+        messageQueue.push({ message, callback });
+        if (!isReconnecting) {
+          reconnect();
+        }
+      });
+    } catch (e) {
+      warn('Error sending message:', e);
+      messageQueue.push({ message, callback });
+      if (!isReconnecting) {
+        reconnect();
+      }
+    }
+  }
 
   /* env check */
   if (!document || !document.addEventListener || !document.body || !document.body.addEventListener) {
@@ -44,51 +85,24 @@
     return;
   }
 
+  // Initialize cookies
+  safeSendMessage( {
+    action: "getCookies",
+    url: window.location.href
+  }, function ( response ) {
+    if (response?.cookies) {
+      log('Cookies received:', response.cookies);
+      cookies = response.cookies;
+    } else if (response?.error) {
+      warn('Error getting cookies:', response.error);
+    }
+  } );
+
   console.log('[delugesiphon] Communicator found:', {
     isObject: typeof communicator === 'object',
     hasInit: typeof communicator.init === 'function',
     hasObserveConnect: typeof communicator.observeConnect === 'function'
   });
-
-  // Queue for messages that need to be sent when connection is restored
-  let messageQueue = [];
-  let isReconnecting = false;
-
-  // Safe message sender that queues messages when disconnected
-  function safeSendMessage(message, callback) {
-    log('Attempting to send message:', message);
-    
-    if (!communicator || !communicator._Connected) {
-      warn('Connection not available, queueing message:', message);
-      messageQueue.push({ message, callback });
-      if (!isReconnecting) {
-        reconnect();
-      }
-      return;
-    }
-
-    try {
-      log('Sending message via communicator:', message);
-      communicator.sendMessage(message, function(response) {
-        log('Received response from background:', response);
-        if (callback) {
-          callback(response);
-        }
-      }, function(error) {
-        warn('Message send failed:', error);
-        messageQueue.push({ message, callback });
-        if (!isReconnecting) {
-          reconnect();
-        }
-      });
-    } catch (e) {
-      warn('Error sending message:', e);
-      messageQueue.push({ message, callback });
-      if (!isReconnecting) {
-        reconnect();
-      }
-    }
-  }
 
   // Process queued messages
   function processMessageQueue() {
@@ -284,6 +298,7 @@
       
       // Initialize toast notification system
       initToastSystem();      
+
       
       log('Initialization complete');
     } catch (e) {
@@ -403,6 +418,13 @@
     log( 'Processing context menu event' );
     var torrentUrl = extract_torrent_url(e.target);
     log('Extracted torrent URL:', torrentUrl);
+    
+    // Store the URL for later use by the background script
+    if (torrentUrl) {
+      window.lastTorrentUrl = torrentUrl;
+      window.lastTorrentDomain = SITE_META.DOMAIN;
+      window.lastTorrentCookies = cookies;
+    }
   }
 
   function handle_leftclick(e) {
@@ -414,11 +436,12 @@
         return;
     }
     
+    var torrentUrl = extract_torrent_url(e.target);
+    log('Extracted torrent URL:', torrentUrl);
+    if (torrentUrl) {
+        
     if (CONTROL_KEY_DEPRESSED) {
         log('Control + left click detected, processing with options');
-        var torrentUrl = extract_torrent_url(e.target);
-        log('Extracted torrent URL:', torrentUrl);
-        if (torrentUrl) {
             stopEvent(e);
             showModal({
                 method: 'addlink-todeluge:withoptions',
@@ -426,12 +449,21 @@
                 domain: SITE_META.DOMAIN,
                 info: { name: 'Add Torrent' }
             }, e);
-        }
+        
     } else {
-        process_event(e, false);
+      stopEvent(e);
+        
+        // Get cookies first, then send message
+        safeSendMessage({
+          method: 'addlink-todeluge',
+          url: torrentUrl,
+          domain: SITE_META.DOMAIN,
+          info: { name: 'Add Torrent' },
+          cookies: cookies
+      });
     }
   }
-
+  }
   function handle_visibilityChange () {
     if ( !document.webkitHidden && document.webkitVisibilityState != 'prerender' ) {
       site_init();
@@ -509,84 +541,42 @@
     overlay.classList.add('displayed');
     log('Modal displayed with loading state');
 
-    // Default data structure
-    const defaultData = {
-        plugins: {},
-        defaultLabel: '',
-        config: {
-            add_paused: false,
-            download_location: '',
-            move_completed: false,
-            move_completed_path: ''
-        }
-    };
-
     // Get plugin info with timeout
     log('Requesting plugin info...');
-    const pluginInfoPromise = new Promise((resolve, reject) => {
-        const timeoutId = setTimeout(() => {
-            warn('Plugin info request timed out');
-            resolve(defaultData);
-        }, 5000);
-
-        safeSendMessage({
-            method: 'plugins-getinfo'
-        }, function(response) {
-            clearTimeout(timeoutId);
-            log('Plugin info response received:', response);
-            
-            if (!response || response.error) {
-                warn('Plugin info request failed:', response?.error || 'No response');
-                resolve(defaultData);
-                return;
-            }
-
-            // Extract plugins and config from response
-            const { plugins, config } = response.value || {};
-            
-            // Debug plugin info structure
-            log('Plugin info structure:', JSON.stringify(plugins));
-            log('Label plugin data:', JSON.stringify(plugins?.Label));
-            
-            // Get default label
-            log('Processing server response...');
-            resolve({
-                plugins: plugins || {},
-                config: config || defaultData.config,
-                defaultLabel: ''  // We'll get this next
+    safeSendMessage({
+        method: 'plugins-getinfo'
+    }, function(response) {
+        log('Plugin info response received:', response);
+        
+        if (!response || response.error) {
+            warn('Plugin info request failed:', response?.error || 'No response');
+            renderModalContent({
+                plugins: {},
+                config: {},
+                defaultLabel: ''
             });
-        });
-    });
+            return;
+        }
 
-    // Render the modal with whatever data we have after the timeout or successful response
-    pluginInfoPromise.then(data => {
         // Get default label if we have plugin data
-        if (data.plugins?.Label?.length > 0) {
-            return new Promise(resolve => {
-                safeSendMessage({
-                    method: 'storage-get-default_label'
-                }, function(labelResponse) {
-                    log('Default label response received:', labelResponse);
-                    data.defaultLabel = labelResponse?.value || '';
-                    resolve(data);
-                });
+        if (response.value?.plugins?.Label?.length > 0) {
+            safeSendMessage({
+                method: 'storage-get-default_label'
+            }, function(labelResponse) {
+                log('Default label response received:', labelResponse);
+                const data = {
+                    ...response.value,
+                    defaultLabel: labelResponse?.value || ''
+                };
+                renderModalContent(data);
+            });
+        } else {
+            renderModalContent(response.value || {
+                plugins: {},
+                config: {},
+                defaultLabel: ''
             });
         }
-        return data;
-    }).then(data => {
-        log('Final data for rendering:', data);
-        // Ensure plugins structure is correct
-        if (!data.plugins) {
-            data.plugins = {};
-        }
-        if (!data.plugins.Label && Array.isArray(data.plugins.labels)) {
-            // Handle case where labels might be under a different property
-            data.plugins.Label = data.plugins.labels;
-        }
-        renderModalContent(data);
-    }).catch(error => {
-        warn('Error during data loading:', error);
-        renderModalContent(defaultData);
     });
 
     function renderModalContent(data) {
@@ -609,7 +599,7 @@
                             ).join('\n')}
                         </select>
                     </div>
-                    ` : '<!-- No Label plugin data available -->'}
+                    ` : ''}
                     
                     ${data.plugins?.AutoAdd?.length > 0 ? `
                     <div class="form-group">
@@ -659,16 +649,6 @@
             log('Modal content rendered, setting up event listeners...');
             setupModalEventListeners();
             
-            // Show/hide move completed path field based on checkbox
-            const moveCompletedCheck = modal.querySelector('input[name="options[move_completed]"]');
-            if (moveCompletedCheck) {
-                moveCompletedCheck.addEventListener('change', function() {
-                    const pathGroup = modal.querySelector('input[name="options[move_completed_path]"]')?.closest('.form-group');
-                    if (pathGroup) {
-                        pathGroup.style.display = this.checked ? 'block' : 'none';
-                    }
-                });
-            }
         } catch (e) {
             warn('Error rendering modal content:', e);
             modal.innerHTML = `
@@ -687,31 +667,85 @@
             `;
             setupModalEventListeners();
         }
-        
-        log('Modal setup complete');
     }
 
     function setupModalEventListeners() {
         const form = modal.querySelector('form');
         if (!form) return;
 
-        // Stop propagation of all events within the modal
-        modal.addEventListener('click', function(e) {
-            e.stopPropagation();
-        });
-        
-        // Add form submit handler
-        form.addEventListener('submit', handleFormSubmit);
+        form.addEventListener('submit', function(e) {
+            e.preventDefault();
+            hideModal();
+            
+            const formData = new FormData(e.target);
+            const data = {
+                method: 'addlink-todeluge',
+                url: formData.get('url'),
+                domain: req.domain,
+                options: {},
+                plugins: {}
+            };
 
-        // Handle move completed checkbox
-        const moveCompletedCheckbox = form.querySelector('input[name="options[move_completed]"]');
-        const moveCompletedPath = form.querySelector('input[name="options[move_completed_path]"]');
-        if (moveCompletedCheckbox && moveCompletedPath) {
-            moveCompletedCheckbox.addEventListener('change', function() {
-                moveCompletedPath.disabled = !this.checked;
+            // Process options and plugins
+            for (let [key, value] of formData.entries()) {
+                if (key.startsWith('options[')) {
+                    const optionKey = key.match(/options\[(.*?)\]/)[1];
+                    data.options[optionKey] = value === 'on' ? true : value;
+                } else if (key.startsWith('plugins[')) {
+                    const pluginKey = key.match(/plugins\[(.*?)\]/)[1];
+                    if (value) {
+                        data.plugins[pluginKey] = value;
+                    }
+                }
+            }
+
+            // ADD THE FUCKING COOKIES
+            data.cookies = window.lastTorrentCookies;
+
+            log('Submitting form data:', data);
+
+            // Save selected label as default if one was chosen
+            if (data.plugins.Label) {
+                safeSendMessage({
+                    method: 'storage-set',
+                    key: 'default_label',
+                    value: data.plugins.Label
+                });
+            }
+
+            // Show a loading toast
+            const loadingToastId = showToast('Adding torrent to Deluge...', 'info', 0);
+
+            // Send the torrent add request
+            safeSendMessage(data, function(response) {
+                // Remove the loading toast
+                removeToast(loadingToastId);
+                
+                if (response?.error) {
+                    log('Error adding torrent:', response.error);
+                    showToast(`Error adding torrent: ${response.error}`, 'error', 5000);
+                } else {
+                    log('Torrent added successfully');
+                    
+                    // Build success message with details
+                    let successMsg = 'Torrent added successfully';
+                    
+                    // Add label info if available
+                    if (data.plugins.Label) {
+                        successMsg += ` with label "${data.plugins.Label}"`;
+                    }
+                    
+                    // Add paused state if set
+                    if (data.options.add_paused) {
+                        successMsg += ' (paused)';
+                    }
+                    
+                    // Show success toast
+                    showToast(successMsg, 'success', 5000);
+                }
             });
-        }
-        
+        });
+
         // Handle cancel button
         const cancelBtn = form.querySelector('button.cancel');
         if (cancelBtn) {
@@ -722,85 +756,10 @@
         overlay.addEventListener('click', hideModal);
         
         // Handle escape key
-        const escapeHandler = function(e) {
+        document.addEventListener('keydown', function escapeHandler(e) {
             if (e.key === 'Escape') {
                 hideModal();
-            }
-        };
-        document.addEventListener('keydown', escapeHandler);
-        
-        // Store the escape handler for cleanup
-        modal.escapeHandler = escapeHandler;
-    }
-
-    function handleFormSubmit(e) {
-        e.preventDefault();
-        
-        // Close modal immediately
-        hideModal();
-        
-        const formData = new FormData(e.target);
-        const data = {
-            method: 'addlink-todeluge',
-            url: formData.get('url'),
-            domain: SITE_META.DOMAIN,
-            options: {},
-            plugins: {}
-        };
-
-        // Process options and plugins
-        for (let [key, value] of formData.entries()) {
-            if (key.startsWith('options[')) {
-                const optionKey = key.match(/options\[(.*?)\]/)[1];
-                data.options[optionKey] = value === 'on' ? true : value;
-            } else if (key.startsWith('plugins[')) {
-                const pluginKey = key.match(/plugins\[(.*?)\]/)[1];
-                if (value) {
-                    data.plugins[pluginKey] = value;
-                }
-            }
-        }
-
-        log('Submitting form data:', data);
-
-        // Save selected label as default if one was chosen
-        if (data.plugins.Label) {
-            safeSendMessage({
-                method: 'storage-set',
-                key: 'default_label',
-                value: data.plugins.Label
-            });
-        }
-
-        // Show a loading toast
-        const loadingToastId = showToast('Adding torrent to Deluge...', 'info', 0);
-
-        // Send the torrent add request
-        safeSendMessage(data, function(response) {
-            // Remove the loading toast
-            removeToast(loadingToastId);
-            
-            if (response?.error) {
-                log('Error adding torrent:', response.error);
-                showToast(`Error adding torrent: ${response.error}`, 'error', 5000);
-            } else {
-                log('Torrent added successfully');
-                
-                // Build success message with details
-                let successMsg = 'Torrent added successfully';
-                
-                // Add label info if available
-                if (data.plugins.Label) {
-                    successMsg += ` with label "${data.plugins.Label}"`;
-                }
-                
-                // Add paused state if set
-                if (data.options.add_paused) {
-                    successMsg += ' (paused)';
-                }
-                
-                // Show success toast
-                showToast(successMsg, 'success', 5000);
+                document.removeEventListener('keydown', escapeHandler);
             }
         });
     }
@@ -809,15 +768,6 @@
         log('Hiding modal');
         modal.classList.remove('displayed');
         overlay.classList.remove('displayed');
-        
-        // Remove event listeners
-        overlay.removeEventListener('click', hideModal);
-        if (modal.escapeHandler) {
-            document.removeEventListener('keydown', modal.escapeHandler);
-            delete modal.escapeHandler;
-        }
-        
-        // Clear content
         modal.innerHTML = '';
     }
   }
@@ -842,17 +792,6 @@
       }
     } );
 
-    /* send a test message to get the cookies */
-    safeSendMessage( {
-      action: "getCookies",
-      url: window.location.href
-    }, function ( response ) {
-      if (response?.cookies) {
-        log('Cookies received:', response.cookies);
-      } else if (response?.error) {
-        warn('Error getting cookies:', response.error);
-      }
-    } );
     
     /* install leftclick handling */
     safeSendMessage( {
@@ -1042,4 +981,24 @@
       }
     }, 300);
   }
+
+  // Listen for messages from the background script
+  chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    log('Received message from background:', request);
+    
+    if (request.method === 'add_dialog') {
+      log('Showing add dialog for:', request.url);
+      showModal({
+        method: 'addlink-todeluge:withoptions',
+        url: request.url,
+        domain: request.domain || SITE_META.DOMAIN,
+        info: { name: 'Add Torrent' }
+      });
+      sendResponse({ success: true });
+      return true;
+    }
+    
+    // Handle other messages...
+    return false;
+  });
 } )( window, document );

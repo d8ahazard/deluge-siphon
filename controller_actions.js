@@ -166,8 +166,8 @@ DelugeConnection.prototype.connectToServer = function() {
   });
 };
 
-DelugeConnection.prototype.addTorrent = function(url, cookie_domain, plugins, options) {
-  console.log('[addTorrent] Called with:', url, cookie_domain, plugins, options);
+DelugeConnection.prototype.addTorrent = function(url, cookies, plugins, options) {
+  console.log('[addTorrent] Called with:', url, cookies, plugins, options);
   
   if (!this.SERVER_URL) {
     const error = new Error('SERVER_URL is not set. Please configure it in the options.');
@@ -190,7 +190,7 @@ DelugeConnection.prototype.addTorrent = function(url, cookie_domain, plugins, op
   return this._connect()
     .then(() => {
       console.log('[addTorrent] Connected, adding torrent...');
-      return this._addTorrentUrlToServer(url, options, cookie_domain);
+      return this._addTorrentUrlToServer(url, options, cookies);
     })
     .then((torrentId) => {
       console.log('[addTorrent] Torrent added successfully:', torrentId);
@@ -963,8 +963,8 @@ DelugeConnection.prototype._getLabelsWithFallbacks = function() {
 };
 
 // Add the missing method for adding torrent URLs
-DelugeConnection.prototype._addTorrentUrlToServer = function(url, options, cookie_domain) {
-    console.log('[_addTorrentUrlToServer] Starting with:', url, options, cookie_domain);
+DelugeConnection.prototype._addTorrentUrlToServer = function(url, options, cookies) {
+    console.log('[_addTorrentUrlToServer] Starting with:', url, options, cookies);
     
     // Build parameter object with correct structure for Deluge
     let params = {};
@@ -990,7 +990,7 @@ DelugeConnection.prototype._addTorrentUrlToServer = function(url, options, cooki
         
         // Add any additional options that were passed
         Object.entries(options).forEach(([key, value]) => {
-            if (!params.hasOwnProperty(key) && key !== 'pageCookies') {
+            if (!params.hasOwnProperty(key)) {
                 params[key] = value;
             }
         });
@@ -1008,75 +1008,38 @@ DelugeConnection.prototype._addTorrentUrlToServer = function(url, options, cooki
     return new Promise((resolve, reject) => {
         chrome.storage.local.get('send_cookies', data => {
             // If send_cookies is disabled, proceed without cookies
-            if (data.send_cookies === false) {
-                console.log('[_addTorrentUrlToServer] Cookie sending disabled');
-                this._addTorrentViaUrl(encodedUrl, params)
-                    .then(resolve)
-                    .catch(reject);
-                return;
-            }
+            if (data.send_cookies !== false) {
+                const cookieString = Object.entries(cookies)
+                    .map(([name, value]) => `${name}=${value}`)
+                    .join('; ');
 
-            // Get cookies from controller_communicator
-            console.log('[_addTorrentUrlToServer] Requesting cookies from controller_communicator');
-            communicator.sendMessage({ action: "getCookies", url: encodedUrl }, (response) => {
-                if (response && response.cookies) {
-                    // Convert cookies object to cookie string
-                    const cookieString = Object.entries(response.cookies)
-                        .map(([name, value]) => `${name}=${value}`)
-                        .join('; ');
-
-                    if (cookieString) {
-                        console.log('[_addTorrentUrlToServer] Adding cookies to request');
-                        params.cookie = cookieString;
-                    }
+                if (cookieString) {
+                    console.log('[_addTorrentUrlToServer] Adding cookies to request', cookieString);
+                    params.cookie = cookieString;
+                } else {
+                    console.log('[_addTorrentUrlToServer] No cookies to add');
                 }
-
-                // Try direct URL method first
-                console.log('[_addTorrentUrlToServer] Trying direct URL method with params:', {
-                    url: encodedUrl,
-                    hasCookies: !!params.cookie
-                });
-                
-                this._addTorrentViaUrl(encodedUrl, params)
-                    .then(resolve)
-                    .catch(error => {
-                        console.warn('[_addTorrentUrlToServer] Direct URL method failed:', error);
-                        
-                        // If we got a 403 and have cookies, try downloading the torrent directly
-                        if (error.code === 403 && params.cookie) {
-                            console.log('[_addTorrentUrlToServer] Got 403 with cookies, attempting direct download');
-                            this._downloadTorrent(encodedUrl, cookie_domain)
-                                .then(torrentData => {
-                                    return this._request('addtorrent-file', {
-                                        method: 'core.add_torrent_file',
-                                        params: ['temp.torrent', torrentData, params],
-                                        id: '-17004.' + Date.now()
-                                    });
-                                })
-                                .then(payload => {
-                                    if (payload.error) {
-                                        throw new Error(payload.error.message || 'Failed to add torrent file');
-                                    }
-                                    resolve(payload.result);
-                                })
-                                .catch(downloadError => {
-                                    console.error('[_addTorrentUrlToServer] Both methods failed:', downloadError);
-                                    // Combine error messages to be more informative
-                                    reject(new Error('Unable to add torrent: Direct access failed (403) and download attempt failed. The site may require authentication or cookies.'));
-                                });
-                        } else {
-                            reject(error);
-                        }
-                    });
-            });
+            
+              this._addTorrentViaUrl(encodedUrl, params)
+                      .then(resolve)
+                      .catch(reject);
+                  return;
+            }
         });
     });
 };
 
 DelugeConnection.prototype._addTorrentViaUrl = function(url, params) {
+    // Extract cookie from params if it exists and move it to headers
+    const headers = {};
+    if (params.cookie) {
+        headers.Cookie = params.cookie;
+        delete params.cookie;  // Remove from params since it's now in headers
+    }
+
     return this._request('addtorrent', {
         method: 'core.add_torrent_url',
-        params: [url, params],
+        params: [url, params, headers],  // Pass headers as third argument
         id: '-17003.' + Date.now()
     })
     .then(payload => {
@@ -1097,7 +1060,7 @@ DelugeConnection.prototype._addTorrentViaUrl = function(url, params) {
                 // Deluge 1.x has a different API signature
                 return this._request('addtorrent-v1', {
                     method: 'core.add_torrent_url',
-                    params: [url, params, {}],
+                    params: [url, params, {}],  // Deluge 1.x doesn't support headers
                     id: '-17003.v1.' + Date.now()
                 });
             }
@@ -1214,20 +1177,38 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   const torrentUrl = info.linkUrl;
   const s1 = torrentUrl.indexOf('//') + 2;
   let domain = torrentUrl.substring(s1);
+  
   const s2 = domain.indexOf('/');
-  if (s2 >= 0) {
-    domain = domain.substring(0, s2);
-  }
+  const cleanDomain = s2 >= 0 ? domain.substring(0, s2) : domain;
 
   if (info.menuItemId === 'add-with-options') {
     // Send message to content script in the active tab
     chrome.tabs.sendMessage(tab.id, {
       method: 'add_dialog',
       url: torrentUrl,
-      domain: domain
+      domain: cleanDomain
+    }, (response) => {
+      if (chrome.runtime.lastError) {
+        console.error('Error sending message to content script:', chrome.runtime.lastError);
+        // Fallback: try to add directly if content script fails
+        communicator.sendMessage({
+          method: 'getCookies',
+          url: torrentUrl
+        }, (response) => {
+          const cookies = response?.cookies || {};
+          delugeConnection.addTorrent(torrentUrl, cookies);
+        });
+      }
     });
   } else if (info.menuItemId === 'add') {
-    delugeConnection.addTorrent(torrentUrl, domain);
+    // Get cookies and add torrent directly
+    communicator.sendMessage({
+      method: 'getCookies',
+      url: torrentUrl
+    }, (response) => {
+      const cookies = response?.cookies || {};
+      delugeConnection.addTorrent(torrentUrl, cookies);
+    });
   }
 });
 
@@ -1282,9 +1263,9 @@ communicator
       }
     } else if (prefix === "addlink") {
       const addtype = parts[0];
-      const { url, domain, plugins, options } = request;
+      const { url, domain, plugins, options, cookies } = request;
 
-      console.log('==== ADDLINK REQUEST ====', addtype, url, domain);
+      console.log('==== ADDLINK REQUEST ====', addtype, url, domain, plugins, options, cookies);
 
       if (!url) {
         console.error('Empty URL in addlink request');
@@ -1302,19 +1283,18 @@ communicator
       }
 
       if (addtype === 'todeluge') {
-        console.log('<<<< PROCESSING ADDLINK-TODELUGE >>>>', url, domain, plugins, options);
+        console.log('<<<< PROCESSING ADDLINK-TODELUGE >>>>', url, domain, plugins, options, cookies);
         try {
-          delugeConnection.addTorrent(url, domain, plugins, options)
-            .then((result) => {
-              console.log('Torrent add successful, sending response:', result);
-              sendResponse({ success: true, result });
-            })
-            .catch((error) => {
-              console.error('Error adding torrent:', error);
-              sendResponse({ error: error.message || 'Unknown error adding torrent' });
-            });
-            
-          // Return true to indicate we'll send the response asynchronously
+          // Get cookies before adding torrent
+            delugeConnection.addTorrent(url, cookies, plugins, options)
+              .then((result) => {
+                console.log('Torrent add successful, sending response:', result);
+                sendResponse({ success: true, result });
+              })
+              .catch((error) => {
+                console.error('Error adding torrent:', error);
+                sendResponse({ error: error.message || 'Unknown error adding torrent' });
+              });
           return true;
         } catch (e) {
           console.error('Exception in addTorrent:', e);
@@ -1525,7 +1505,14 @@ communicator
 
       if (addtype === 'todeluge') {
         console.log('<<<< ADDLINK >>>>', url, domain, plugins, options);
-        delugeConnection.addTorrent(url, domain, plugins, options);
+        // Get cookies before adding torrent
+        communicator.sendMessage({
+          method: 'getCookies',
+          url: url
+        }, (response) => {
+          const cookies = response?.cookies || {};
+          delugeConnection.addTorrent(url, cookies, plugins, options);
+        });
       } else if (addtype === 'todeluge:withoptions') {
         console.log('Processing addlink-todeluge:withoptions request');
         // First get plugin info and server config
