@@ -1,6 +1,6 @@
 /* global stopEvent, communicator, chrome, registerEventListener */
 ( function ( window, document ) {
-  console.log('[delugesiphon] Content handler script loaded');
+  debugLog('debug', 'Content handler script loaded');
   let cookies = {};
   
   // Queue for messages that need to be sent when connection is restored
@@ -9,10 +9,10 @@
 
   // Safe message sender that queues messages when disconnected
   function safeSendMessage(message, callback) {
-    log('Attempting to send message:', message);
+    debugLog('debug', 'Attempting to send message:', message);
     
     if (!communicator || !communicator._Connected) {
-      warn('Connection not available, queueing message:', message);
+      debugLog('warn', 'Connection not available, queueing message:', message);
       messageQueue.push({ message, callback });
       if (!isReconnecting) {
         reconnect();
@@ -21,21 +21,21 @@
     }
 
     try {
-      log('Sending message via communicator:', message);
+      debugLog('debug', 'Sending message via communicator:', message);
       communicator.sendMessage(message, function(response) {
-        log('Received response from background:', response);
+        debugLog('debug', 'Received response from background:', response);
         if (callback) {
           callback(response);
         }
       }, function(error) {
-        warn('Message send failed:', error);
+        debugLog('error', 'Message send failed:', error);
         messageQueue.push({ message, callback });
         if (!isReconnecting) {
           reconnect();
         }
       });
     } catch (e) {
-      warn('Error sending message:', e);
+      debugLog('error', 'Error sending message:', e);
       messageQueue.push({ message, callback });
       if (!isReconnecting) {
         reconnect();
@@ -45,7 +45,7 @@
 
   /* env check */
   if (!document || !document.addEventListener || !document.body || !document.body.addEventListener) {
-    console.warn('[delugesiphon] Environment check failed:', {
+    debugLog('error', 'Environment check failed:', {
       document: !!document,
       addEventListener: !!document?.addEventListener,
       body: !!document?.body,
@@ -54,7 +54,7 @@
     return;
   }
 
-  console.log('[delugesiphon] Environment check passed');
+  debugLog('debug', 'Environment check passed');
 
   var CONTROL_KEY_DEPRESSED = false,
     SITE_META = {
@@ -69,19 +69,19 @@
       INSTALLED: false
     };
 
-  console.log('[delugesiphon] SITE_META initialized:', SITE_META);
+  debugLog('debug', 'SITE_META initialized:', SITE_META);
 
   const log = function (...args) {
-    console.log('[delugesiphon]', `[${SITE_META.DOMAIN}]`, ...args);
+    debugLog('debug', `[${SITE_META.DOMAIN}]`, ...args);
   };
 
   const warn = function (...args) {
-    console.log('[delugesiphon]', `[${SITE_META.DOMAIN}]`, ...args);
+    debugLog('warn', `[${SITE_META.DOMAIN}]`, ...args);
   };
 
   // Verify communicator is available
   if (!communicator) {
-    console.error('[delugesiphon] Communicator not found in global scope');
+    debugLog('error', 'Communicator not found in global scope');
     return;
   }
 
@@ -91,14 +91,14 @@
     url: window.location.href
   }, function ( response ) {
     if (response?.cookies) {
-      log('Cookies received:', response.cookies);
+      debugLog('debug', 'Cookies received:', response.cookies);
       cookies = response.cookies;
     } else if (response?.error) {
-      warn('Error getting cookies:', response.error);
+      debugLog('error', 'Error getting cookies:', response.error);
     }
   } );
 
-  console.log('[delugesiphon] Communicator found:', {
+  debugLog('debug', 'Communicator found:', {
     isObject: typeof communicator === 'object',
     hasInit: typeof communicator.init === 'function',
     hasObserveConnect: typeof communicator.observeConnect === 'function'

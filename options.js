@@ -90,10 +90,10 @@
 
       // Save all data at once
       chrome.storage.local.set(dataToSave, function() {
-        console.log('Settings saved:', dataToSave);
+        debugLog('important', 'Settings saved:', dataToSave);
         // Verify the save by reading back
         chrome.storage.local.get(null, function(allData) {
-          console.log('All settings after save:', allData);
+          debugLog('debug', 'All settings after save:', allData);
         });
         document.getElementById('save_options').textContent = 'Save';
         // Broadcast settings change
@@ -149,7 +149,7 @@
 
     // For labels, if needed, we call communicator to get label info
     communicator.sendMessage({ method: 'plugins-getinfo' }, function(response) {
-      var labels = response.value && response.value.Label ? response.value.Label : null;
+      var labels = response.value?.plugins?.Label || null;
       var labelsContainer = document.getElementById('labels-options');
       labelsContainer.innerHTML = '';
       if(labels) {
@@ -159,7 +159,7 @@
           labels.forEach(function(label) {
             html += '<option value="' + label + '">' + label + '</option>';
           });
-          html += '</select><span><small>Apply this label to all new torrents by default</small></span></div>';
+          html += '</select><br><span><small>Apply this label to all new torrents by default</small></span></div>';
           labelsContainer.innerHTML = html;
           // Set stored default label
           chrome.storage.local.get('default_label', function(data) {

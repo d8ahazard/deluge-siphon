@@ -36,6 +36,7 @@
     "all_frames": true,
     "matches": ["<all_urls>"], 
     "js": [
+      "lib/logger.js",
       "lib/utils.js", 
       "lib/controller_communicator.js", 
       "content_handler.js"
@@ -54,7 +55,8 @@
         "images/*.gif",
         "lib/images/*.png",
         "options.css",
-        "options.js"
+        "options.js",
+        "lib/logger.js"
       ],
       "matches": ["<all_urls>"]
     }

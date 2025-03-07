@@ -8,6 +8,10 @@
   const reminder = getEl('reminder');
   const torrentsContainer = getEl('torrents') || document.createElement('div');
   
+  // Refresh interval in milliseconds
+  const REFRESH_INTERVAL = 3000;
+  let refreshTimer = null;
+  
   // If torrents container doesn't exist, create and add it
   if (!getEl('torrents')) {
     torrentsContainer.id = 'torrents';
@@ -88,11 +92,24 @@
       
       // Get torrent data if we have a valid server
       fetchTorrentData();
+      
+      // Set up periodic refresh
+      if (!refreshTimer) {
+        refreshTimer = setInterval(() => {
+          fetchTorrentData();
+        }, REFRESH_INTERVAL);
+      }
     } else {
       serverUrlDiv.classList.add('hidden');
       serverUrlLink.removeAttribute('href');
       reminder.textContent = "Don't forget to configure your server info first!";
       torrentsContainer.innerHTML = '';
+      
+      // Clear refresh timer if no server
+      if (refreshTimer) {
+        clearInterval(refreshTimer);
+        refreshTimer = null;
+      }
     }
   }
   
@@ -189,15 +206,29 @@
 
   // Initialize communication and get server info
   communicator.observeConnect(() => {
-    communicator.sendMessage({
-      method: "storage-get-connections"
-    }, response => {
-      try {
-        const serverUrl = response?.value?.[0]?.url;
-        updateUI(serverUrl);
-      } catch (e) {
-        console.error('Error getting server URL:', e);
-        updateUI(null);
+    // Function to fetch and update server info
+    const updateServerInfo = () => {
+      communicator.sendMessage({
+        method: "storage-get-connections"
+      }, response => {
+        try {
+          const serverUrl = response?.value?.[0]?.url;
+          updateUI(serverUrl);
+        } catch (e) {
+          debugLog('error', 'Error getting server URL:', e);
+          updateUI(null);
+        }
+      });
+    };
+
+    // Initial update
+    updateServerInfo();
+    
+    // Set up cleanup when popup closes
+    window.addEventListener('unload', () => {
+      if (refreshTimer) {
+        clearInterval(refreshTimer);
+        refreshTimer = null;
       }
     });
   }).init('popup');

@@ -1,18 +1,5 @@
 /* global chrome, communicator */
-// debug
-let DEBUG = false;
-chrome.storage.local.get('enable_debug_logging', function(data) {
-  DEBUG = !!data.enable_debug_logging;
-  if (DEBUG) {
-    console.warn('*** Debug logging enabled ***');
-  }
-});
-
-function debugLog(...args) {
-  if (DEBUG) {
-    console.log(...args);
-  }
-}
+// Remove local debug logging implementation since it's now in logger.js
 
 /**
  * Utility function to retry a promise-based operation with exponential backoff
@@ -39,7 +26,7 @@ function retryWithBackoff(operation, options = {}) {
         .then(resolve)
         .catch(error => {
           if (attempts < maxRetries && shouldRetry(error)) {
-            console.log(`Operation failed, retrying (${attempts}/${maxRetries})...`, error.message);
+            debugLog('warn', `Operation failed, retrying (${attempts}/${maxRetries})...`, error.message);
             
             // Calculate delay with exponential backoff and jitter
             const delay = Math.min(
@@ -47,7 +34,7 @@ function retryWithBackoff(operation, options = {}) {
               baseDelay * Math.pow(2, attempts - 1) * (0.9 + Math.random() * 0.2)
             );
             
-            console.log(`Retrying in ${Math.round(delay / 100) / 10} seconds...`);
+            debugLog('debug', `Retrying in ${Math.round(delay / 100) / 10} seconds...`);
             setTimeout(attempt, delay);
           } else {
             reject(error);
@@ -65,7 +52,6 @@ const COOKIES = {}; // we need to hang onto your cookies so deluge can ask your 
 
 /* BEGIN DelugeConnection */
 function DelugeConnection() {
-  debugLog('*** new DelugeConnection ***');
   this.state = '';
   this.daemon_hosts = [];
   this.CONNECT_ATTEMPTS = 0;
@@ -85,65 +71,56 @@ function DelugeConnection() {
 
 DelugeConnection.prototype._initState = function() {
   return new Promise((resolve, reject) => {
-    console.warn('_initState: Starting initialization');
-    
-    // First, verify storage access
-    chrome.storage.local.get('test', (result) => {
-      console.warn('_initState: Storage access test:', result);
-      
-      // Now try to get connections specifically
-      chrome.storage.local.get('connections', data => {
-        console.warn('_initState: Raw connections data:', data);
-        
-        // Debug: List all storage keys
-        chrome.storage.local.get(null, allData => {
-          console.warn('_initState: All storage keys:', Object.keys(allData));
-        });
-        
-        try {
-          if (data && data.connections) {
-    if (typeof data.connections === 'string') {
-              console.warn('_initState: Parsing connections string');
+    debugLog('warn', '_initState: Starting initialization');
+
+    // Get connection info
+    chrome.storage.local.get('connections', data => {
       try {
-        this.CONNECTION_INFO = JSON.parse(data.connections);
-              } catch (e) {
-                console.error('_initState: JSON parse error:', e);
-                this.CONNECTION_INFO = [];
-              }
-            } else {
-              console.warn('_initState: Using connections directly:', data.connections);
-              this.CONNECTION_INFO = data.connections;
-            }
-          } else {
-            console.warn('_initState: No connections data found in storage');
-            this.CONNECTION_INFO = [];
+        // Parse connections if it's a string
+        if (typeof data.connections === 'string') {
+          try {
+            data.connections = JSON.parse(data.connections);
+          } catch (e) {
+            debugLog('error', '_initState: JSON parse error:', e);
+            data.connections = [];
           }
-          
-    if (!Array.isArray(this.CONNECTION_INFO)) {
-            console.warn('_initState: CONNECTION_INFO is not an array, resetting to empty array');
-      this.CONNECTION_INFO = [];
-    }
+        }
 
-          console.warn('_initState: Final CONNECTION_INFO:', this.CONNECTION_INFO);
-
-    this.SERVER_URL = this.CONNECTION_INFO.length ? this.CONNECTION_INFO[0].url : null;
-    this.SERVER_PASS = this.CONNECTION_INFO.length ? this.CONNECTION_INFO[0].pass : null;
-          
-          console.warn('_initState: Final state:', {
-            SERVER_URL: this.SERVER_URL,
-            SERVER_PASS: this.SERVER_PASS ? '[REDACTED]' : null,
-            CONNECTION_INFO_LENGTH: this.CONNECTION_INFO.length
-          });
-          
-          resolve();
-        } catch (error) {
-          console.error('_initState: Critical error:', error);
-          this.CONNECTION_INFO = [];
+        // Ensure connections is an array
+        this.CONNECTION_INFO = Array.isArray(data.connections) ? data.connections : [];
+        
+        // Set server URL and password from first connection
+        if (this.CONNECTION_INFO.length > 0) {
+          this.SERVER_URL = this.CONNECTION_INFO[0].url;
+          this.SERVER_PASS = this.CONNECTION_INFO[0].pass;
+        } else {
           this.SERVER_URL = null;
           this.SERVER_PASS = null;
-          resolve(); // Resolve anyway to allow retry logic to work
         }
-      });
+
+        debugLog('warn', '_initState: Initialization complete', {
+          hasConnections: this.CONNECTION_INFO.length > 0,
+          hasServerUrl: !!this.SERVER_URL
+        });
+
+        resolve({
+          CONNECTION_INFO: this.CONNECTION_INFO,
+          SERVER_URL: this.SERVER_URL,
+          SERVER_PASS: this.SERVER_PASS
+        });
+
+      } catch (e) {
+        debugLog('error', '_initState: Critical error during initialization:', e);
+        // Reset to safe defaults on error
+        this.CONNECTION_INFO = [];
+        this.SERVER_URL = null;
+        this.SERVER_PASS = null;
+        resolve({
+          CONNECTION_INFO: [],
+          SERVER_URL: null,
+          SERVER_PASS: null
+        });
+      }
     });
   });
 };
@@ -167,11 +144,11 @@ DelugeConnection.prototype.connectToServer = function() {
 };
 
 DelugeConnection.prototype.addTorrent = function(url, cookies, plugins, options) {
-  console.log('[addTorrent] Called with:', url, cookies, plugins, options);
+  debugLog('log', '[addTorrent] Called with:', url, cookies, plugins, options);
   
   if (!this.SERVER_URL) {
     const error = new Error('SERVER_URL is not set. Please configure it in the options.');
-    console.error('[addTorrent] Rejected due to missing SERVER_URL:', error);
+    debugLog('error', '[addTorrent] Rejected due to missing SERVER_URL:', error);
     
     notify({
       message: 'Please visit the options page to get started!'
@@ -185,15 +162,15 @@ DelugeConnection.prototype.addTorrent = function(url, cookies, plugins, options)
     contextMessage: url
   }, 3000, this._getNotificationId(url), 'request');
 
-  console.log('[addTorrent] Starting connection...');
+  debugLog('log', '[addTorrent] Starting connection...');
   
   return this._connect()
     .then(() => {
-      console.log('[addTorrent] Connected, adding torrent...');
+      debugLog('log', '[addTorrent] Connected, adding torrent...');
       return this._addTorrentUrlToServer(url, options, cookies);
     })
     .then((torrentId) => {
-      console.log('[addTorrent] Torrent added successfully:', torrentId);
+      debugLog('log', '[addTorrent] Torrent added successfully:', torrentId);
       
       // Process plugins (like labels) if provided
       if (plugins && Object.keys(plugins).length > 0) {
@@ -215,7 +192,7 @@ DelugeConnection.prototype.addTorrent = function(url, cookies, plugins, options)
       return torrentId;
     })
     .catch(error => {
-      console.error('[addTorrent] Error:', error);
+      debugLog('error', '[addTorrent] Error:', error);
       notify({
         message: 'Error adding torrent',
         contextMessage: error.message || 'Unknown error'
@@ -248,7 +225,7 @@ DelugeConnection.prototype.getPluginInfo = function(silent) {
 /* helpers */
 DelugeConnection.prototype._serverError = function(payload, silent) {
   if (payload.error) {
-    console.error('_serverError', payload);
+    debugLog('error', '_serverError', payload);
     const contextMessage = String(payload.error.message || this.state);
     if (!silent && contextMessage) {
       notify({ 
@@ -270,7 +247,7 @@ DelugeConnection.prototype._connect = function(silent) {
   // Always ensure state is initialized first
   return this._initState()
     .then(() => {
-      console.log('State initialized:', {
+      debugLog('log', 'State initialized:', {
         SERVER_URL: this.SERVER_URL,
         CONNECTION_INFO: this.CONNECTION_INFO
       });
@@ -292,7 +269,7 @@ DelugeConnection.prototype._connect = function(silent) {
 DelugeConnection.prototype._request = function(state, params, silent) {
   this.state = state;
   
-  console.log('[_request] Starting request:', {
+  debugLog('log', '[_request] Starting request:', {
     state,
     params,
     SERVER_URL: this.SERVER_URL ? this.SERVER_URL.replace(/:[^\/]+@/, ':*****@') : null,
@@ -301,13 +278,13 @@ DelugeConnection.prototype._request = function(state, params, silent) {
   
   if (!this.SERVER_URL) {
     // Try to re-initialize state if SERVER_URL is not available
-    console.log('[_request] No SERVER_URL, trying to reinitialize state');
+    debugLog('log', '[_request] No SERVER_URL, trying to reinitialize state');
     return this._initState().then(() => {
       if (!this.SERVER_URL) {
-        console.error('[_request] SERVER_URL still not available after _initState');
+        debugLog('error', '[_request] SERVER_URL still not available after _initState');
         return Promise.reject(new Error('Server URL not available'));
       }
-      console.log('[_request] STATE reinitialized, retrying request');
+      debugLog('log', '[_request] STATE reinitialized, retrying request');
       // Retry the request now that we have initialized
       return this._request(state, params, silent);
     });
@@ -318,9 +295,9 @@ DelugeConnection.prototype._request = function(state, params, silent) {
     // Ensure we have a valid URL by properly joining paths
     const baseUrl = this.SERVER_URL.endsWith('/') ? this.SERVER_URL : this.SERVER_URL + '/';
     url = new URL('json', baseUrl).href;
-    console.log('[_request] Request URL (redacted):', url.replace(/:[^\/]+@/, ':*****@'));
+    debugLog('log', '[_request] Request URL (redacted):', url.replace(/:[^\/]+@/, ':*****@'));
   } catch (e) {
-    console.error('[_request] Error constructing URL:', e);
+    debugLog('error', '[_request] Error constructing URL:', e);
     return Promise.reject(new Error('Invalid server URL'));
   }
 
@@ -330,26 +307,34 @@ DelugeConnection.prototype._request = function(state, params, silent) {
   };
   
   if (this.SESSION_COOKIE) {
-    console.log('[_request] Adding session cookie to request');
+    debugLog('log', '[_request] Adding session cookie to request');
     headers['Cookie'] = this.SESSION_COOKIE;
   }
   
   if (this.CSRF_TOKEN) {
-    console.log('[_request] Adding CSRF token to request');
+    debugLog('log', '[_request] Adding CSRF token to request');
     headers['X-CSRF-Token'] = this.CSRF_TOKEN;
   }
+
+  // Ensure params is properly structured with required fields
+  const requestBody = {
+    method: params.method,
+    params: params.params || [],
+    id: params.id || Date.now()
+  };
 
   const fetchOptions = {
     method: 'POST',
     headers: headers,
-    body: JSON.stringify(params),
+    body: JSON.stringify(requestBody),
     credentials: 'include'
   };
 
-  console.log('[_request] Making fetch request to Deluge server:', { 
+  debugLog('log', '[_request] Making fetch request to Deluge server:', { 
     url: url.replace(/:[^\/]+@/, ':*****@'), 
-    method: params.method,
-    id: params.id,
+    method: requestBody.method,
+    params: requestBody.params,
+    id: requestBody.id,
     headers: Object.keys(headers)
   });
 
@@ -361,83 +346,70 @@ DelugeConnection.prototype._request = function(state, params, silent) {
   return fetch(url, fetchOptions)
     .then(response => {
       clearTimeout(timeoutId);
+      debugLog('log', `[_request] Response received: ${response.status} ${response.statusText}`);
       
-      console.log(`[_request] Response received: ${response.status} ${response.statusText}`);
-      
-      const cookies = response.headers.get('set-cookie');
-      if (cookies) {
-        console.log('[_request] Received cookies from server');
-        this.SESSION_COOKIE = cookies;
+      // Store session cookie if provided
+      const setCookie = response.headers.get('Set-Cookie');
+      if (setCookie) {
+        debugLog('log', '[_request] Received cookies from server');
+        this.SESSION_COOKIE = setCookie;
       }
       
-      const csrfToken = response.headers.get('X-CSRF-Token') || response.headers.get('x-csrf-token');
+      // Store CSRF token if provided
+      const csrfToken = response.headers.get('X-CSRF-Token');
       if (csrfToken) {
-        console.log('[_request] Received CSRF token from server');
+        debugLog('log', '[_request] Received CSRF token from server');
         this.CSRF_TOKEN = csrfToken;
       }
       
       if (!response.ok) {
-        console.error('[_request] HTTP error:', response.status, response.statusText);
-        // Only treat 403 as auth error if it's not a torrent add operation
-        if (response.status === 403 && !params.method.includes('add_torrent')) {
-          console.log('[_request] 403 Forbidden on non-torrent operation - attempting to re-authenticate');
-          this.SESSION_COOKIE = null;
-          this.CSRF_TOKEN = null;
-          return this._doLogin(silent).then(() => {
-            return this._request(state, params, silent);
-          });
+        debugLog('error', '[_request] HTTP error:', response.status, response.statusText);
+        
+        if (response.status === 403 && !params.method.includes('torrent')) {
+          debugLog('log', '[_request] 403 Forbidden on non-torrent operation - attempting to re-authenticate');
+          return this._getSession().then(() => this._request(state, params, silent));
         }
+        
         throw new Error(`HTTP error! status: ${response.status}`);
       }
       return response.json();
     })
     .then(payload => {
-      console.log('[_request] Response payload:', JSON.stringify(payload).substring(0, 200) + '...');
+      debugLog('log', '[_request] Response payload:', JSON.stringify(payload).substring(0, 200) + '...');
       
-      if (this._serverError(payload, silent)) {
-        console.error('[_request] Server reported error:', payload.error);
-        
-        // Check if this is a 403 from a remote server (for torrent operations)
-        if (payload.error?.message?.includes('403 Forbidden') && params.method.includes('add_torrent')) {
-          console.log('[_request] Remote server returned 403 - this is likely a torrent access issue');
-          return Promise.reject(new Error('Remote server denied access - the site may require authentication'));
-        }
-        
-        // Only treat authentication-specific errors as auth issues
-        if (payload.error?.message?.includes('Not authenticated')) {
-          console.log('[_request] Authentication error detected, attempting to re-authenticate');
-          this.SESSION_COOKIE = null;
-          this.CSRF_TOKEN = null;
-          return this._doLogin(silent).then(() => {
-            return this._request(state, params, silent);
-          });
-        }
-        
-        return Promise.reject(new Error(payload.error?.message || 'Server error'));
+      if (payload.error) {
+        debugLog('error', '[_request] Server reported error:', payload.error);
+        throw new Error(payload.error.message || 'Unknown server error');
       }
-      
-      console.log('[_request] Request completed successfully:', state);
+
+      if (payload.status === 403) {
+        debugLog('log', '[_request] Remote server returned 403 - this is likely a torrent access issue');
+        throw new Error('Access denied by remote server');
+      }
+
+      // Handle authentication errors
+      if (this._isAuthError(payload)) {
+        debugLog('log', '[_request] Authentication error detected, attempting to re-authenticate');
+        return this._getSession().then(() => this._request(state, params, silent));
+      }
+
+      // Update state if provided
+      if (payload.state) {
+        this.state = payload.state;
+      }
+
+      debugLog('log', '[_request] Request completed successfully:', state);
       return payload;
     })
     .catch(error => {
       clearTimeout(timeoutId);
-      
-      console.error('[_request] Request failed:', error);
-      
+      debugLog('error', '[_request] Request failed:', error);
+
       if (error.name === 'AbortError') {
-        console.error('[_request] Request timed out after', timeoutDuration, 'ms');
-        if (!silent) {
-          notify({
-            message: 'Connection to Deluge timed out',
-            contextMessage: 'Check if your server is reachable and not overloaded'
-          }, 5000, this._getNotificationId(), 'error');
-        }
-      } else if (!silent) {
-        notify({
-          message: 'Error connecting to Deluge',
-          contextMessage: error.message || 'Check network connection and server URL'
-        }, 5000, this._getNotificationId(), 'error');
+        debugLog('error', '[_request] Request timed out after', timeoutDuration, 'ms');
+        throw new Error(`Request timed out after ${timeoutDuration}ms`);
       }
+
       throw error;
     });
 };
@@ -446,8 +418,8 @@ DelugeConnection.prototype._getDomainCookies = function(url, cookie_domain) {
   return new Promise((resolve) => {
     chrome.storage.local.get('send_cookies', data => {
       if (!data.send_cookies) {
-        console.log('_getDomainCookies', 'Sending cookies is disabled');
-        resolve('');
+        debugLog('log', '_getDomainCookies', 'Sending cookies is disabled');
+        resolve({});
         return;
       }
 
@@ -455,19 +427,19 @@ DelugeConnection.prototype._getDomainCookies = function(url, cookie_domain) {
         const hostname = new URL(url).hostname;
         const cleanCookieDomain = cookie_domain?.replace(/^\./, '');
         if (!cleanCookieDomain || !hostname.endsWith(cleanCookieDomain)) {
-          console.log('_getDomainCookies', cookie_domain, '!=', hostname);
-          resolve('');
+          debugLog('log', '_getDomainCookies', cookie_domain, '!=', hostname);
+          resolve({});
           return;
         }
 
-        console.log('_getDomainCookies', 'Fetching cookies for domain:', cookie_domain);
+        debugLog('log', '_getDomainCookies', 'Fetching cookies for domain:', cookie_domain);
 
         communicator.sendMessage(
           { action: "getCookies", url: url },
           (response) => {
             if (response.error) {
-              console.error("Error getting cookies:", response.error);
-              resolve('');
+              debugLog('error', "Error getting cookies:", response.error);
+              resolve({});
               return;
             }
 
@@ -505,59 +477,58 @@ DelugeConnection.prototype._getDomainCookies = function(url, cookie_domain) {
                 .join('; ');
 
               if (!cookieString) {
-                console.log('_getDomainCookies', 'No valid cookies found');
-                resolve('');
+                debugLog('log', '_getDomainCookies', 'No valid cookies found');
+                resolve({});
                 return;
               }
 
               COOKIES[cookie_domain] = cookieString;
-              console.log('_getDomainCookies', 'Final cookies:', Object.keys(cookiesByName));
-              resolve(cookieString);
+              debugLog('log', '_getDomainCookies', 'Final cookies:', Object.keys(cookiesByName));
+              resolve(cookiesByName);
 
             } else {
-              resolve('');
+              resolve({});
             }
           }
         );
 
       } catch (e) {
-        console.error('_getDomainCookies error:', e);
-        resolve('');
+        debugLog('error', '_getDomainCookies error:', e);
+        resolve({});
       }
     });
   });
 };
 DelugeConnection.prototype._getSession = function() {
-  console.log('[_getSession] Checking if session is valid');
+  debugLog('log', '[_getSession] Checking if session is valid');
   
-  return this._request('getsession', {
-    method: 'auth.check_session',
-    params: [],
-    id: '-16990.' + Date.now()
-  }).then(payload => {
-    if (payload?.result) {
-      console.log('[_getSession] Session is valid');
-      return payload.result;
-    }
-    console.error('[_getSession] Session is invalid:', payload);
-    throw new Error('Invalid session');
-  });
+  return this._request('auth.check_session', {
+    method: 'auth.check_session'
+  }, true)
+    .then(payload => {
+      if (payload.result === true) {
+        debugLog('log', '[_getSession] Session is valid');
+        return true;
+      }
+      debugLog('error', '[_getSession] Session is invalid:', payload);
+      return this._doLogin();
+    });
 };
 
 DelugeConnection.prototype._doLogin = function(silent) {
-  console.log('[_doLogin] Attempting to login with saved credentials');
+  debugLog('log', '[_doLogin] Attempting to login with saved credentials');
   
   if (!this.SERVER_PASS) {
-    console.error('[_doLogin] No password available');
+    debugLog('error', '[_doLogin] No password available');
     return Promise.reject(new Error('No password available'));
   }
   
-  return this._request('dologin', {
+  return this._request('auth.login', {
     method: 'auth.login',
     params: [this.SERVER_PASS],
     id: '-17000.' + Date.now()
   }, silent).then(payload => {
-    console.log('[_doLogin] Login response:', payload?.result ? 'Success' : 'Failed');
+    debugLog('log', '[_doLogin] Login response:', payload?.result ? 'Success' : 'Failed');
     
     if (payload.result) {
       // Check for any cookies or CSRF tokens in the response headers
@@ -565,7 +536,7 @@ DelugeConnection.prototype._doLogin = function(silent) {
       
       // Check that we can actually use the session
       return this._getSession().then(() => {
-        console.log('[_doLogin] Successfully verified session after login');
+        debugLog('log', '[_doLogin] Successfully verified session after login');
         return payload.result;
       });
     }
@@ -584,70 +555,55 @@ DelugeConnection.prototype._doLogin = function(silent) {
 };
 
 DelugeConnection.prototype._checkDaemonConnection = function() {
-  console.log('Checking daemon connection');
+  debugLog('log', 'Checking daemon connection');
   
-  return this._request('check-daemon', {
-    method: 'web.connected',
-    params: [],
-    id: 1
+  return this._request('web.connected', {
+    method: 'web.connected'
   })
   .then(response => {
     if (response.result === true) {
-      console.log('Daemon is connected');
+      debugLog('log', 'Daemon is connected');
       return true;
     }
-    console.log('Daemon is not connected, will try to connect to one');
+    debugLog('log', 'Daemon is not connected, will try to connect to one');
     return false;
   });
 };
 
 DelugeConnection.prototype._getDaemons = function() {
-  return this._request('getdaemons', {
-    method: 'web.get_hosts',
-    params: [],
-    id: '-16992'
+  return this._request('web.get_hosts', {
+    method: 'web.get_hosts'
   }).then(payload => {
-    if (payload.result) {
-      this.daemon_hosts = payload.result;
-      console.log('_getDaemons__callback', payload);
-      return payload.result;
-    }
-    this.daemon_hosts = [];
-    console.error('_getDaemons failed', payload);
-    notify({ message: 'Error: cannot connect to deluge server' }, 3000, this._getNotificationId(), 'error');
-    return Promise.reject(new Error('Failed to get daemons'));
+    debugLog('log', '_getDaemons__callback', payload);
+    this.daemon_hosts = payload.result || [];
+    return this.daemon_hosts;
+  }).catch(error => {
+    debugLog('error', '_getDaemons failed', error);
+    throw error;
   });
 };
 
-DelugeConnection.prototype._getHostStatus = function(hostId, ip, port) {
-  console.log('_getHostStatus', hostId);
+DelugeConnection.prototype._getHostStatus = function(hostId) {
+  debugLog('log', '_getHostStatus', hostId);
 
-  return this._request('gethoststatus', {
+  return this._request('web.get_host_status', {
     method: 'web.get_host_status',
-    params: [hostId],
-    id: '-16992.' + hostId
+    params: [hostId]
   }).then(payload => {
     if (!payload.result) {
-      console.error('_getHostStatus__callback', hostId, 'failed', payload);
-      notify({ message: 'Error: cannot connect to deluge server' }, 3000, this._getNotificationId(), 'error');
-      return Promise.reject(new Error('Failed to get host status'));
+      debugLog('error', '_getHostStatus__callback', hostId, 'failed', payload);
+      throw new Error('Failed to get host status');
     }
 
-    // ["c6099253ba83ea059adb7f6db27cd80228572721", "127.0.0.1", 52039, "Connected", "1.3.5"]
-    // ["c6099253ba83ea059adb7f6db27cd80228572721", "Connected", "2.0.0"]
-    const daemon_info = {};
-    daemon_info.host_id = payload.result.shift();
-    if (payload.result.length > 2) {
-      daemon_info.ip = payload.result.shift();
-      daemon_info.port = payload.result.shift();
-  } else {
-      daemon_info.ip = ip;
-      daemon_info.port = port;
-    }
-    daemon_info.status = payload.result.shift();
-    daemon_info.version = payload.result.shift();
+    const [status, info] = payload.result;
+    const daemon_info = {
+      status: status,
+      info: info,
+      hostId: hostId,
+      host: this.daemon_hosts.find(h => h[0] === hostId)
+    };
 
-    console.log('_getHostStatus__callback', daemon_info);
+    debugLog('log', '_getHostStatus__callback', daemon_info);
     return daemon_info;
   });
 };
@@ -658,33 +614,33 @@ DelugeConnection.prototype._getConnectedDaemon = function(daemon_hosts) {
   }
 
   if (!daemon_hosts?.length) {
-    console.error('No daemons available:', daemon_hosts);
+    debugLog('error', 'No daemons available:', daemon_hosts);
     return Promise.reject(new Error('No daemons available'));
   }
 
   // Process each daemon host sequentially until we find one that works
   return daemon_hosts.reduce((promise, daemon_host) => {
     return promise.catch(() => {
-      return this._getHostStatus(daemon_host[0], daemon_host[1], daemon_host[2])
+      return this._getHostStatus(daemon_host[0])
         .then(daemon_info => {
           switch (daemon_info.status) {
             case 'Connected':
-              console.log('_getConnectedDaemon__callback', 'Connected', daemon_info);
+              debugLog('log', '_getConnectedDaemon__callback', 'Connected', daemon_info);
               return daemon_info;
             
             case 'Online':
-              console.log('_getConnectedDaemon__callback', 'Connecting');
+              debugLog('log', '_getConnectedDaemon__callback', 'Connecting');
               return this._connectDaemon(daemon_info);
             
             case 'Offline':
-              console.log('_getConnectedDaemon__callback', 'Starting');
+              debugLog('log', '_getConnectedDaemon__callback', 'Starting');
               return this._startDaemon(daemon_info)
                 .then(info => this._connectDaemon(info));
             
             default:
-              console.warn('_getConnectedDaemon__callback', 'UNKNOWN STATUS: ' + daemon_info.status);
+              debugLog('warn', '_getConnectedDaemon__callback', 'UNKNOWN STATUS: ' + daemon_info.status);
               notify({
-                message: `Error: failed to connect to deluge server: '${daemon_info.ip}:${daemon_info.port}'`
+                message: `Error: failed to connect to deluge server: '${daemon_info.host}:${daemon_info.port}'`
               }, 3000, this._getNotificationId(), 'error');
               return Promise.reject(new Error(`Unknown daemon status: ${daemon_info.status}`));
           }
@@ -699,272 +655,217 @@ DelugeConnection.prototype._getConnectedDaemon = function(daemon_hosts) {
 };
 
 DelugeConnection.prototype._startDaemon = function(daemon_info) {
-  console.log('_startDaemon', daemon_info);
+  debugLog('log', '_startDaemon', daemon_info);
 
-  return this._request('startdaemon', {
+  return this._request('web.start_daemon', {
     method: 'web.start_daemon',
-    params: [daemon_info.port],
-    id: '-16993'
+    params: [daemon_info.hostId]
   }).then(payload => {
-    console.log('_startDaemon__callback', payload);
-    if (!payload.error) {
-      notify({ message: `Starting server ${daemon_info.ip}:${daemon_info.port}` }, 1500, this._getNotificationId());
-      return daemon_info;
-    }
-    console.error(this.state, 'ERROR', payload);
-    return Promise.reject(new Error('Failed to start daemon'));
+    debugLog('log', '_startDaemon__callback', payload);
+    return this._connectDaemon(daemon_info);
+  }).catch(error => {
+    debugLog('error', this.state, 'ERROR', error);
+    throw error;
   });
 };
 
 DelugeConnection.prototype._connectDaemon = function(daemon_info) {
-  console.log('_connectDaemon', daemon_info);
+  debugLog('log', '_connectDaemon', daemon_info);
 
-  if (daemon_info.status === 'Online') {
-    return this._request('connectdaemon', {
-      method: 'web.connect',
-      params: [daemon_info.host_id],
-      id: '-16994'
-    }).then(payload => {
-      console.log('_connectDaemon__callback', payload);
-      if (!payload.error) {
-        notify({ message: 'Reconnected to server' }, 1500, this._getNotificationId());
-        return daemon_info;
-      }
-      console.error('_connectDaemon__callback', this.state, 'ERROR', payload);
-      return Promise.reject(new Error('Failed to connect to daemon'));
-    });
-  }
-
-  if (this.CONNECT_ATTEMPTS >= 5) {
-    notify({
-      contextMessage: `Gave up on ${daemon_info.ip}:${daemon_info.port} after ${this.CONNECT_ATTEMPTS} attempts`,
-      message: "Only supported in Classic Mode",
-      priority: 2,
-      requireInteraction: true
-    }, -1, this._getNotificationId(), 'error');
-    return Promise.reject(new Error('Max connection attempts reached'));
-  }
-
-  this.CONNECT_ATTEMPTS += 1;
-
-  notify({
-    contextMessage: `Server ${daemon_info.ip}:${daemon_info.port} not ready`,
-    message: 'Trying again in 5 seconds'
-  }, 3500, this._getNotificationId());
-
-  return new Promise((resolve, reject) => {
-    setTimeout(() => {
-      this._getHostStatus(daemon_info.host_id)
-        .then(info => this._connectDaemon(info))
-        .then(resolve)
-        .catch(reject);
-    }, 5000);
-})};
+  return this._request('web.connect', {
+    method: 'web.connect',
+    params: [daemon_info.hostId]
+  }).then(payload => {
+    debugLog('log', '_connectDaemon__callback', payload);
+    return true;
+  }).catch(error => {
+    debugLog('error', '_connectDaemon__callback', this.state, 'ERROR', error);
+    throw error;
+  });
+};
 
 DelugeConnection.prototype._getServerConfig = function() {
-  console.log('_getServerConfig');
+  debugLog('log', '_getServerConfig');
 
-  return this._request('getconfig', {
-    method: 'core.get_config_values',
-    params: [[
-      'allow_remote',
-      'download_location',
-      'move_completed',
-      'move_completed_path',
-      'add_paused'
-    ]],
-    id: '-17001'
+  return this._request('core.get_config', {
+    method: 'core.get_config'
   }).then(payload => {
-    console.log('_getServerConfig__callback', payload.result);
-    this.server_config = { ...payload.result };
-
-    if (!this.server_config.allow_remote) {
-      console.error('_getServerConfig__error', 'Remote connections disabled');
-      notify({
-        message: 'Enable this in Preferences -> Daemon',
-        contextMessage: 'Remote connections must be allowed',
-        priority: 2,
-        requireInteraction: true
-      }, -1, this._getNotificationId(), 'error');
-      return Promise.reject(new Error('Remote connections disabled'));
+    if (!payload.result) {
+      throw new Error('No config result');
     }
 
-    return [this.server_config];
+    debugLog('log', '_getServerConfig__callback', payload.result);
+    this.server_config = payload.result;
+    return this.server_config;
   }).catch(error => {
-    console.error('_getServerConfig__error', error);
+    if (error.message === 'Access denied by remote server') {
+      debugLog('error', '_getServerConfig__error', 'Remote connections disabled');
+      throw new Error('Remote connections are not enabled on your Deluge server');
+    }
+    debugLog('error', '_getServerConfig__error', error);
     throw error;
   });
 };
 
 DelugeConnection.prototype._getPlugins = function() {
-    console.log('Requesting plugins from server...');
-    return this._request('getplugins', {
-        method: 'web.get_plugins',
-        params: [],
-        id: '-17002'
-    }).then(payload => {
-        console.log('Raw plugin response:', payload);
-        
-        if (!payload.result) {
-            console.error('_getPlugins failed - no result:', payload);
-            return Promise.reject(new Error('Failed to get plugins'));
-        }
-        
-        // Try different methods to get plugins based on server response
-        let plugins;
-        if (Array.isArray(payload.result)) {
-            console.log('Plugin result is array:', payload.result);
-            plugins = payload.result;
-        } else if (typeof payload.result === 'object') {
-            console.log('Plugin result is object:', payload.result);
-            // Some Deluge versions return {plugin: enabled} format
-            plugins = Object.entries(payload.result)
-                .filter(([_, enabled]) => enabled)
-                .map(([name]) => name);
-        } else {
-            console.warn('Unexpected plugin result format:', payload.result);
-            plugins = [];
-        }
-        
-        console.log('Processed plugin list:', plugins);
-        
-        // If Label plugin is enabled, get the labels
-        let labelPromise = Promise.resolve({});
-        if (plugins.includes('Label')) {
-            console.log('Label plugin found, requesting labels...');
-            labelPromise = this._request('getlabels', {
-                method: 'label.get_labels',
-                params: [],
-                id: '-17003'
-            }).then(labelPayload => {
-                console.log('Label list response:', labelPayload);
-                if (labelPayload.error) {
-                    console.warn('Error getting labels, trying alternative method:', labelPayload.error);
-                    throw new Error('Label plugin error');
-                }
-                
-                // Return a properly structured object with the Label plugin information
-                return {
-                    Label: labelPayload.result || []
-                };
-            }).catch(error => {
-                console.log('Trying alternative label method...');
-                // Try alternative method for older Deluge versions
-                return this._request('getlabels-alt', {
-                    method: 'core.get_config_value',
-                    params: ['label_prefs'],
-                    id: '-17004'
-                }).then(altPayload => {
-                    console.log('Alternative label response:', altPayload);
-                    if (altPayload.result && Array.isArray(altPayload.result.labels)) {
-                        return {
-                            Label: altPayload.result.labels
-                        };
-                    } else {
-                        console.warn('No valid labels found in alternative response');
-                        return { Label: [] };
-                    }
-                }).catch(err => {
-                    console.error('All label retrieval methods failed:', err);
-                    return { Label: [] };
-                });
+  debugLog('log', 'Requesting plugins from server...');
+
+  return this._request('web.get_plugins', {
+    method: 'web.get_plugins'
+  }).then(payload => {
+    debugLog('log', 'Raw plugin response:', payload);
+    
+    if (!payload.result) {
+      debugLog('error', '_getPlugins failed - no result:', payload);
+      throw new Error('No plugin data received');
+    }
+    
+    let plugins;
+    if (Array.isArray(payload.result)) {
+      debugLog('log', 'Plugin result is array:', payload.result);
+      plugins = payload.result;
+    } else if (typeof payload.result === 'object') {
+      debugLog('log', 'Plugin result is object:', payload.result);
+      plugins = Object.keys(payload.result).filter(key => payload.result[key]);
+    } else {
+      debugLog('warn', 'Unexpected plugin result format:', payload.result);
+      plugins = [];
+    }
+    
+    debugLog('log', 'Processed plugin list:', plugins);
+    
+    // If Label plugin is found, get available labels
+    if (plugins.includes('Label')) {
+      debugLog('log', 'Label plugin found, requesting labels...');
+
+      return this._request('label.get_labels', {
+        method: 'label.get_labels'
+      })
+        .then(labelPayload => {
+          debugLog('log', 'Label list response:', labelPayload);
+
+          if (!labelPayload.result) {
+            debugLog('warn', 'Error getting labels, trying alternative method:', labelPayload.error);
+
+            // Try alternative method for older versions
+            return this._request('label.get_config', {
+              method: 'label.get_config'
             });
-        } else if (plugins.includes('label')) {
-            // Try lowercase 'label' plugin (some Deluge versions use this)
-            console.log('lowercase label plugin found, requesting labels...');
-            labelPromise = this._request('getlabels-lowercase', {
-                method: 'label.get_labels',
-                params: [],
-                id: '-17005'
-            }).then(labelPayload => {
-                console.log('lowercase label list response:', labelPayload);
-                if (labelPayload.error) {
-                    throw new Error('lowercase label plugin error');
-                }
-                return {
-                    Label: labelPayload.result || []
-                };
-            }).catch(err => {
-                console.error('lowercase label retrieval failed:', err);
-                return { Label: [] };
-            });
-        }
-        
-        return labelPromise.then(pluginInfo => {
-            console.log('Final plugin info structure:', pluginInfo);
-            this.plugin_info = pluginInfo;
-            return pluginInfo;
+          }
+          return labelPayload;
+        })
+        .then(labelPayload => {
+          debugLog('log', 'Trying alternative label method...');
+
+          if (labelPayload.result) {
+            const altPayload = labelPayload.result.labels || [];
+            debugLog('log', 'Alternative label response:', altPayload);
+            return {
+              plugins,
+              Label: altPayload
+            };
+          }
+
+          debugLog('warn', 'No valid labels found in alternative response');
+          return { plugins, Label: [] };
+        })
+        .catch(err => {
+          debugLog('error', 'All label retrieval methods failed:', err);
+          return { plugins, Label: [] };
         });
-    });
+    }
+
+    // If label plugin (lowercase) is found, get available labels
+    if (plugins.includes('label')) {
+      debugLog('log', 'lowercase label plugin found, requesting labels...');
+
+      return this._request('label.get_labels', {
+        method: 'label.get_labels'
+      })
+        .then(labelPayload => {
+          debugLog('log', 'lowercase label list response:', labelPayload);
+          return {
+            plugins,
+            Label: labelPayload.result || []
+          };
+        })
+        .catch(err => {
+          debugLog('error', 'lowercase label retrieval failed:', err);
+          return { plugins, Label: [] };
+        });
+    }
+
+    // No label plugin found
+    return { plugins };
+  })
+  .then(pluginInfo => {
+    debugLog('log', 'Final plugin info structure:', pluginInfo);
+    this.plugin_info = pluginInfo;
+    return pluginInfo;
+  });
 };
 
 // Add a new method to get labels with fallbacks
 DelugeConnection.prototype._getLabelsWithFallbacks = function() {
-  console.log('Getting labels with fallbacks...');
+  debugLog('log', 'Getting labels with fallbacks...');
   
   // Try the standard method first
-  return this._request('getlabels-standard', {
-    method: 'label.get_labels',
-    params: [],
-    id: '-17010'
+  return this._request('label.get_labels', {
+    method: 'label.get_labels'
   })
   .then(labelPayload => {
-    console.log('Standard label response:', labelPayload);
+    debugLog('log', 'Standard label response:', labelPayload);
     if (labelPayload && Array.isArray(labelPayload.result)) {
       return labelPayload.result;
     }
     if (labelPayload && labelPayload.error) {
-      console.warn('Standard label method failed, trying fallback 1');
+      debugLog('warn', 'Standard label method failed, trying fallback 1');
       throw new Error('Standard method failed: ' + labelPayload.error);
     }
     return [];
   })
   .catch(err => {
     // Fallback 1: Try with alternative method for older Deluge versions
-    console.log('Trying label fallback method 1...');
-    return this._request('getlabels-fallback1', {
-      method: 'core.get_config_value',
-      params: ['label_prefs'],
-      id: '-17011'
+    debugLog('log', 'Trying label fallback method 1...');
+    return this._request('label.get_config', {
+      method: 'label.get_config'
     })
     .then(altPayload => {
-      console.log('Fallback 1 label response:', altPayload);
+      debugLog('log', 'Fallback 1 label response:', altPayload);
       if (altPayload.result && Array.isArray(altPayload.result.labels)) {
         return altPayload.result.labels;
       }
-      console.warn('Fallback 1 failed, trying fallback 2');
+      debugLog('warn', 'Fallback 1 failed, trying fallback 2');
       throw new Error('Fallback 1 failed');
     });
   })
   .catch(err => {
     // Fallback 2: Try with the LabelPlus plugin
-    console.log('Trying label fallback method 2 (LabelPlus)...');
-    return this._request('getlabels-fallback2', {
-      method: 'labelplus.get_labels',
-      params: [],
-      id: '-17012'
+    debugLog('log', 'Trying label fallback method 2 (LabelPlus)...');
+    return this._request('labelplus.get_labels', {
+      method: 'labelplus.get_labels'
     })
     .then(labelPlusPayload => {
-      console.log('Fallback 2 (LabelPlus) response:', labelPlusPayload);
+      debugLog('log', 'Fallback 2 (LabelPlus) response:', labelPlusPayload);
       if (labelPlusPayload.result) {
         // LabelPlus returns an object with label IDs as keys
         return Object.values(labelPlusPayload.result)
           .filter(label => typeof label === 'object' && label.name)
           .map(label => label.name);
       }
-      console.warn('All label fallbacks failed');
+      debugLog('warn', 'All label fallbacks failed');
       return [];
     });
   })
   .catch(err => {
-    console.error('All label retrieval methods failed:', err);
+    debugLog('error', 'All label retrieval methods failed:', err);
     return [];
   });
 };
 
 // Add the missing method for adding torrent URLs
 DelugeConnection.prototype._addTorrentUrlToServer = function(url, options, cookies) {
-    console.log('[_addTorrentUrlToServer] Starting with:', url, options, cookies);
+    debugLog('log', '[_addTorrentUrlToServer] Starting with:', url, options, cookies);
     
     // Build parameter object with correct structure for Deluge
     let params = {};
@@ -1014,10 +915,10 @@ DelugeConnection.prototype._addTorrentUrlToServer = function(url, options, cooki
                     .join('; ');
 
                 if (cookieString) {
-                    console.log('[_addTorrentUrlToServer] Adding cookies to request', cookieString);
+                    debugLog('log', '[_addTorrentUrlToServer] Adding cookies to request', cookieString);
                     params.cookie = cookieString;
                 } else {
-                    console.log('[_addTorrentUrlToServer] No cookies to add');
+                    debugLog('log', '[_addTorrentUrlToServer] No cookies to add');
                 }
             
               this._addTorrentViaUrl(encodedUrl, params)
@@ -1037,13 +938,13 @@ DelugeConnection.prototype._addTorrentViaUrl = function(url, params) {
         delete params.cookie;  // Remove from params since it's now in headers
     }
 
-    return this._request('addtorrent', {
+    return this._request('core.add_torrent_url', {
         method: 'core.add_torrent_url',
         params: [url, params, headers],  // Pass headers as third argument
         id: '-17003.' + Date.now()
     })
     .then(payload => {
-        console.log('[_addTorrentViaUrl] Add torrent response:', payload);
+        debugLog('log', '[_addTorrentViaUrl] Add torrent response:', payload);
         
         if (!payload) {
             throw new Error('Empty response from server');
@@ -1055,10 +956,10 @@ DelugeConnection.prototype._addTorrentViaUrl = function(url, params) {
                 (payload.error.message.includes('takes exactly 3 arguments') || 
                  payload.error.message.includes('takes exactly three arguments'))) {
                 
-                console.log('[_addTorrentViaUrl] Detected Deluge 1.x API, retrying with adjusted parameters');
+                debugLog('log', '[_addTorrentViaUrl] Detected Deluge 1.x API, retrying with adjusted parameters');
                 
                 // Deluge 1.x has a different API signature
-                return this._request('addtorrent-v1', {
+                return this._request('core.add_torrent_url', {
                     method: 'core.add_torrent_url',
                     params: [url, params, {}],  // Deluge 1.x doesn't support headers
                     id: '-17003.v1.' + Date.now()
@@ -1094,15 +995,15 @@ DelugeConnection.prototype._processPluginOptions = function(url, plugins, torren
     
     // Handle Label plugin
     if (plugins.Label) {
-        console.log('[_processPluginOptions] Setting label:', plugins.Label);
+        debugLog('log', '[_processPluginOptions] Setting label:', plugins.Label);
         promises.push(
-            this._request('set-torrent-label', {
+            this._request('label.set_torrent', {
                 method: 'label.set_torrent',
                 params: [torrentId, plugins.Label],
                 id: '-17004.' + Date.now()
             })
             .catch(error => {
-                console.error('[_processPluginOptions] Error setting label:', error);
+                debugLog('error', '[_processPluginOptions] Error setting label:', error);
                 // Don't fail the whole operation if label setting fails
                 return Promise.resolve();
             })
@@ -1114,7 +1015,13 @@ DelugeConnection.prototype._processPluginOptions = function(url, plugins, torren
     return Promise.all(promises);
 };
 
-
+// Add the missing _isAuthError method
+DelugeConnection.prototype._isAuthError = function(payload) {
+  return payload.error && 
+         (payload.error.message?.includes('Not authenticated') || 
+          payload.error.message?.includes('Invalid session') ||
+          payload.error.message?.includes('No session exists'));
+};
 
 /* notification handling */
 function notify(opts, decay, id, icon_type) {
@@ -1189,7 +1096,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
       domain: cleanDomain
     }, (response) => {
       if (chrome.runtime.lastError) {
-        console.error('Error sending message to content script:', chrome.runtime.lastError);
+        debugLog('error', 'Error sending message to content script:', chrome.runtime.lastError);
         // Fallback: try to add directly if content script fails
         communicator.sendMessage({
           method: 'getCookies',
@@ -1222,10 +1129,10 @@ chrome.storage.local.get(['enable_context_menu', 'enable_context_menu_with_optio
 // Message handling
 communicator
   .observeMessage((request, sendResponse) => {
-    console.log('Message received by background script:', request);
+    debugLog('log', 'Message received by background script:', request);
     
     if (!request || !request.method) {
-      console.error('Invalid message received', request);
+      debugLog('error', 'Invalid message received', request);
       sendResponse({ error: 'Invalid message format' });
       return;
     }
@@ -1233,9 +1140,9 @@ communicator
     const [prefix, ...parts] = request.method.split('-');
     const method = parts.join('-');
 
-    console.log('Processing message:', prefix, method, request);
+    debugLog('log', 'Processing message:', prefix, method, request);
     if (request.method === "settings-changed") {
-      console.log('~~~ MESSAGE ~~~ Settings Changed');
+      debugLog('log', '~~~ MESSAGE ~~~ Settings Changed');
       delugeConnection._initState().then(() => {
         chrome.storage.local.get(['enable_context_menu', 'enable_context_menu_with_options'], data => {
           if (data.enable_context_menu) {
@@ -1244,7 +1151,7 @@ communicator
         });
       });
     } else if (request.method === "notify") {
-      console.log('~~~ MESSAGE ~~~ Send Notification');
+      debugLog('log', '~~~ MESSAGE ~~~ Send Notification');
       notify(request.opts, request.decay, 'content', request.type);
     } else if (prefix === "storage") {
       const [action, ...keyParts] = parts;
@@ -1265,10 +1172,10 @@ communicator
       const addtype = parts[0];
       const { url, domain, plugins, options, cookies } = request;
 
-      console.log('==== ADDLINK REQUEST ====', addtype, url, domain, plugins, options, cookies);
+      debugLog('log', '==== ADDLINK REQUEST ====', addtype, url, domain, plugins, options, cookies);
 
       if (!url) {
-        console.error('Empty URL in addlink request');
+        debugLog('error', 'Empty URL in addlink request');
         notify({ message: 'Error: Empty URL' }, 3000, delugeConnection._getNotificationId(), 'error');
         sendResponse({ error: 'Empty URL' });
         return;
@@ -1276,43 +1183,43 @@ communicator
 
       const url_match = url.match(/^(magnet:)|((file|(ht|f)tp(s?)):\/\/).+/);
       if (!url_match) {
-        console.error('Invalid URL format:', url);
+        debugLog('error', 'Invalid URL format:', url);
         notify({ message: `Error: Invalid URL '${url}'` }, 3000, delugeConnection._getNotificationId(), 'error');
         sendResponse({ error: 'Invalid URL format' });
         return;
       }
 
       if (addtype === 'todeluge') {
-        console.log('<<<< PROCESSING ADDLINK-TODELUGE >>>>', url, domain, plugins, options, cookies);
+        debugLog('log', '<<<< PROCESSING ADDLINK-TODELUGE >>>>', url, domain, plugins, options, cookies);
         try {
           // Get cookies before adding torrent
             delugeConnection.addTorrent(url, cookies, plugins, options)
               .then((result) => {
-                console.log('Torrent add successful, sending response:', result);
+                debugLog('log', 'Torrent add successful, sending response:', result);
                 sendResponse({ success: true, result });
               })
               .catch((error) => {
-                console.error('Error adding torrent:', error);
+                debugLog('error', 'Error adding torrent:', error);
                 sendResponse({ error: error.message || 'Unknown error adding torrent' });
               });
           return true;
         } catch (e) {
-          console.error('Exception in addTorrent:', e);
+          debugLog('error', 'Exception in addTorrent:', e);
           sendResponse({ error: e.message || 'Exception in addTorrent' });
         }
       } else if (addtype === 'todeluge:withoptions') {
-        console.log('Processing addlink-todeluge:withoptions request');
+        debugLog('log', 'Processing addlink-todeluge:withoptions request');
         // First get plugin info and server config
         delugeConnection._connect(true)
           .then(() => {
-            console.log('Connected to server, getting plugin info and config');
+            debugLog('log', 'Connected to server, getting plugin info and config');
             return Promise.all([
               delugeConnection._getPlugins(),
               delugeConnection._getServerConfig()
             ]);
           })
           .then(([plugins, [config]]) => {
-            console.log('Got plugin info and config:', { plugins, config });
+            debugLog('log', 'Got plugin info and config:', { plugins, config });
             sendResponse({
               method: 'add_dialog',
               url,
@@ -1322,7 +1229,7 @@ communicator
             });
           })
           .catch(error => {
-            console.error('Error getting plugin info or config:', error);
+            debugLog('error', 'Error getting plugin info or config:', error);
             // Send response with empty data so modal can still show
             sendResponse({
               method: 'add_dialog',
@@ -1342,55 +1249,34 @@ communicator
 
       switch(actiontype) {
         case 'getinfo':
-          console.log('Handling plugins-getinfo request');
+          debugLog('log', 'Handling plugins-getinfo request');
           // First connect and get both plugin info and server config
           delugeConnection._connect(true)
             .then(() => {
-              console.log('Connected to server, getting data...');
+              debugLog('log', 'Connected to server, getting data...');
               return Promise.all([
-                delugeConnection._request('getplugins', {
-                  method: 'web.get_plugins',
-                  params: [],
-                  id: '-17002'
+                delugeConnection._request('web.get_plugins', {
+                  method: 'web.get_plugins'
                 }),
-                delugeConnection._request('getconfig', {
-                  method: 'core.get_config_values',
-                  params: [[
-                    'allow_remote',
-                    'download_location',
-                    'move_completed',
-                    'move_completed_path',
-                    'add_paused',
-                    'compact_allocation',
-                    'max_connections_per_torrent',
-                    'max_upload_slots_per_torrent',
-                    'max_upload_speed_per_torrent',
-                    'max_download_speed_per_torrent',
-                    'prioritize_first_last_pieces',
-                    'remove_seed_at_ratio',
-                    'stop_seed_at_ratio',
-                    'stop_seed_ratio'
-                  ]],
-                  id: '-17001'
+                delugeConnection._request('core.get_config', {
+                  method: 'core.get_config'
                 }),
                 // Always try to get labels regardless of plugin list
                 delugeConnection._getLabelsWithFallbacks(),
                 // Try to get AutoAdd plugin paths if available
-                delugeConnection._request('get-autoadd-paths', {
-                  method: 'autoadd.get_watchdirs',
-                  params: [],
-                  id: '-17020'
+                delugeConnection._request('autoadd.get_watchdirs', {
+                  method: 'autoadd.get_watchdirs'
                 }).catch(err => {
-                  console.log('AutoAdd plugin not available:', err);
+                  debugLog('log', 'AutoAdd plugin not available:', err);
                   return { result: {} };
                 })
               ]);
             })
             .then(([pluginsPayload, configPayload, labels, autoaddPayload]) => {
-              console.log('Raw plugin response:', pluginsPayload);
-              console.log('Raw config response:', configPayload);
-              console.log('Labels retrieved:', labels);
-              console.log('AutoAdd paths:', autoaddPayload);
+              debugLog('log', 'Raw plugin response:', pluginsPayload);
+              debugLog('log', 'Raw config response:', configPayload);
+              debugLog('log', 'Labels retrieved:', labels);
+              debugLog('log', 'AutoAdd paths:', autoaddPayload);
               
               // Process the plugins list
               let enabledPlugins = [];
@@ -1401,7 +1287,7 @@ communicator
                   .filter(([_, enabled]) => enabled)
                   .map(([name]) => name);
               }
-              console.log('Enabled plugins:', enabledPlugins);
+              debugLog('log', 'Enabled plugins:', enabledPlugins);
               
               // Process AutoAdd plugin data
               let watchDirs = [];
@@ -1424,11 +1310,11 @@ communicator
                 }
               };
               
-              console.log('Sending final response structure:', response);
+              debugLog('log', 'Sending final response structure:', response);
               sendResponse(response);
             })
             .catch(error => {
-              console.error('Failed to get data:', error);
+              debugLog('error', 'Failed to get data:', error);
               sendResponse({
                 error: error.message,
                 value: {
@@ -1439,7 +1325,7 @@ communicator
             });
           break;
         default:
-          console.error('Unknown plugin action:', actiontype);
+          debugLog('error', 'Unknown plugin action:', actiontype);
           sendResponse({ error: `unknown plugin action: '${actiontype}'` });
       }
     } else if (request.method === "storage-get-default_label") {
@@ -1453,8 +1339,8 @@ communicator
       // Get list of active torrents for the popup
       delugeConnection._connect(true)
         .then(() => {
-          console.log('Connected, getting torrent list');
-          return delugeConnection._request('get-torrents', {
+          debugLog('log', 'Connected, getting torrent list');
+          return delugeConnection._request('web.update_ui', {
             method: 'web.update_ui',
             params: [
               ['name', 'progress', 'state', 'download_payload_rate', 'upload_payload_rate', 'eta'],
@@ -1464,7 +1350,7 @@ communicator
           });
         })
         .then(response => {
-          console.log('Torrent list response:', response);
+          debugLog('log', 'Torrent list response:', response);
           if (response && response.result && response.result.torrents) {
             // Format the torrent data for the popup
             const torrents = Object.entries(response.result.torrents).map(([id, data]) => ({
@@ -1483,7 +1369,7 @@ communicator
           }
         })
         .catch(error => {
-          console.error('Error getting torrent list:', error);
+          debugLog('error', 'Error getting torrent list:', error);
           sendResponse({ error: error.message, value: [] });
         });
       
@@ -1504,7 +1390,7 @@ communicator
       }
 
       if (addtype === 'todeluge') {
-        console.log('<<<< ADDLINK >>>>', url, domain, plugins, options);
+        debugLog('log', '<<<< ADDLINK >>>>', url, domain, plugins, options);
         // Get cookies before adding torrent
         communicator.sendMessage({
           method: 'getCookies',
@@ -1514,18 +1400,18 @@ communicator
           delugeConnection.addTorrent(url, cookies, plugins, options);
         });
       } else if (addtype === 'todeluge:withoptions') {
-        console.log('Processing addlink-todeluge:withoptions request');
+        debugLog('log', 'Processing addlink-todeluge:withoptions request');
         // First get plugin info and server config
         delugeConnection._connect(true)
           .then(() => {
-            console.log('Connected to server, getting plugin info and config');
+            debugLog('log', 'Connected to server, getting plugin info and config');
             return Promise.all([
               delugeConnection._getPlugins(),
               delugeConnection._getServerConfig()
             ]);
           })
           .then(([plugins, [config]]) => {
-            console.log('Got plugin info and config:', { plugins, config });
+            debugLog('log', 'Got plugin info and config:', { plugins, config });
             sendResponse({
               method: 'add_dialog',
               url,
@@ -1535,7 +1421,7 @@ communicator
             });
           })
           .catch(error => {
-            console.error('Error getting plugin info or config:', error);
+            debugLog('error', 'Error getting plugin info or config:', error);
             // Send response with empty data so modal can still show
             sendResponse({
               method: 'add_dialog',
@@ -1549,7 +1435,7 @@ communicator
         notify({ message: `Unknown server type: '${addtype}'` }, 3000, delugeConnection._getNotificationId(), 'error');
       }
     } else {
-      console.error('Unknown method:', request.method);
+      debugLog('error', 'Unknown method:', request.method);
       sendResponse({ error: `unknown method: '${request.method}'` });
     }
     
@@ -1569,5 +1455,5 @@ chrome.notifications.onClicked.addListener(notId => {
 // Handle extension installation/updates
 chrome.runtime.onInstalled.addListener(install => {
   const manifest = chrome.runtime.getManifest();
-  console.log('[INSTALLED: ' + manifest.version + ']', install);
+  debugLog('log', '[INSTALLED: ' + manifest.version + ']', install);
 });

@@ -2,6 +2,7 @@
 
 // Import necessary scripts without jQuery
 importScripts(
+  'lib/logger.js',
   'lib/utils.js',
   'lib/controller_communicator.js',
   'controller_actions.js'
@@ -9,13 +10,13 @@ importScripts(
 
 // Add event listeners for service worker lifecycle events
 self.addEventListener('install', (event) => {
-  console.log('Service Worker: Installed');
+  debugLog('important', 'Service Worker: Installed');
   // Ensure the service worker activates immediately
   event.waitUntil(self.skipWaiting());
 });
 
 self.addEventListener('activate', (event) => {
-  console.log('Service Worker: Activated');
+  debugLog('important', 'Service Worker: Activated');
   // Ensure the service worker takes control immediately
   event.waitUntil(self.clients.claim());
 });
@@ -35,11 +36,11 @@ self.addEventListener('fetch', (event) => {
           throw new Error(`HTTP error! status: ${response.status}`);
         }
         return response.clone().json().then(data => {
-          console.log('Deluge server response:', data);
+          debugLog('debug', 'Deluge server response:', data);
           return response;
         });
       }).catch(error => {
-        console.error('Deluge server request failed:', error);
+        debugLog('error', 'Deluge server request failed:', error);
         // Return a proper JSON error response
         return new Response(JSON.stringify({
           error: true,
@@ -58,7 +59,7 @@ self.addEventListener('fetch', (event) => {
       fetch(event.request).then((response) => {
         return response;
       }).catch((error) => {
-        console.error('Extension fetch error:', error);
+        debugLog('error', 'Extension fetch error:', error);
         return new Response('Network error occurred', {
           status: 408,
           statusText: 'Request Timeout'
