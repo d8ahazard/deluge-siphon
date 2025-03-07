@@ -59,7 +59,7 @@ self.addEventListener('fetch', (event) => {
       fetch(event.request).then((response) => {
         return response;
       }).catch((error) => {
-        debugLog('error', 'Extension fetch error:', error);
+        debugLog('warn', 'Extension fetch error:', error, event.request);
         return new Response('Network error occurred', {
           status: 408,
           statusText: 'Request Timeout'

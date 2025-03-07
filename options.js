@@ -278,6 +278,22 @@
         chrome.tabs.create({ url: 'chrome://extensions/?id=' + chrome.runtime.id });
       });
     }
+
+    // Initialize accordions
+    document.querySelectorAll('.accordion-header').forEach(function(header) {
+      header.addEventListener('click', function() {
+        const isExpanded = header.classList.contains('expanded');
+        const content = header.nextElementSibling;
+        
+        if (isExpanded) {
+          header.classList.remove('expanded');
+          content.classList.remove('expanded');
+        } else {
+          header.classList.add('expanded');
+          content.classList.add('expanded');
+        }
+      });
+    });
   }
 
   // Initialize when communicator connects

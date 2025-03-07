@@ -281,7 +281,7 @@ DelugeConnection.prototype._request = function(state, params, silent) {
     debugLog('log', '[_request] No SERVER_URL, trying to reinitialize state');
     return this._initState().then(() => {
       if (!this.SERVER_URL) {
-        debugLog('error', '[_request] SERVER_URL still not available after _initState');
+        debugLog('warn', '[_request] SERVER_URL still not available after _initState');
         return Promise.reject(new Error('Server URL not available'));
       }
       debugLog('log', '[_request] STATE reinitialized, retrying request');
@@ -378,7 +378,7 @@ DelugeConnection.prototype._request = function(state, params, silent) {
       debugLog('log', '[_request] Response payload:', JSON.stringify(payload).substring(0, 200) + '...');
       
       if (payload.error) {
-        debugLog('error', '[_request] Server reported error:', payload.error);
+        debugLog('warn', '[_request] Server reported error:', payload.error, url, params);
         throw new Error(payload.error.message || 'Unknown server error');
       }
 
@@ -403,10 +403,11 @@ DelugeConnection.prototype._request = function(state, params, silent) {
     })
     .catch(error => {
       clearTimeout(timeoutId);
-      debugLog('error', '[_request] Request failed:', error);
-
+      // This is a warning because it happens if an extension is not installed
+      console.warn('[_request] Request failed:', error);
+      
       if (error.name === 'AbortError') {
-        debugLog('error', '[_request] Request timed out after', timeoutDuration, 'ms');
+        console.error('[_request] Request timed out after', timeoutDuration, 'ms');
         throw new Error(`Request timed out after ${timeoutDuration}ms`);
       }
 
@@ -1435,7 +1436,7 @@ communicator
         notify({ message: `Unknown server type: '${addtype}'` }, 3000, delugeConnection._getNotificationId(), 'error');
       }
     } else {
-      debugLog('error', 'Unknown method:', request.method);
+      debugLog('error',  `unknown method: '${request.method}'`, request);
       sendResponse({ error: `unknown method: '${request.method}'` });
     }
     

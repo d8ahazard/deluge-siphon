@@ -228,57 +228,57 @@
           return true;
         });
 
-      let connected = false;
-      let retryCount = 0;
-      const maxRetries = 3;
-      const retryDelay = 1000; // 1 second between retries
-      
-      function tryConnect() {
-        if (connected) return;
+        let connected = false;
+        let retryCount = 0;
+        const maxRetries = 3;
+        const retryDelay = 1000; // 1 second between retries
         
-        try {
-          log('Attempting connection, try #' + (retryCount + 1));
-          communicator.init(true);
-          log('Communicator initialized');
+        function tryConnect() {
+          if (connected) return;
           
-          // Test connection immediately
-          setTimeout(() => {
-            if (!connected) {
-              safeSendMessage({ method: 'ping' }, function(response) {
-                log('Ping response received:', response);
-                if (response) {
-                  log('Connection verified via ping');
-                  connected = true;
-                  clearTimeout(timeout);
-                  resolve();
-                } else if (retryCount < maxRetries) {
-                  retryCount++;
-                  setTimeout(tryConnect, retryDelay);
-                }
-              });
+          try {
+            log('Attempting connection, try #' + (retryCount + 1));
+            communicator.init(true);
+            log('Communicator initialized');
+            
+            // Test basic communication channel
+            setTimeout(() => {
+              if (!connected) {
+                safeSendMessage({ method: 'storage-get-connections' }, function(response) {
+                  log('Communication test response:', response);
+                  if (response !== undefined) {
+                    log('Communication channel verified');
+                    connected = true;
+                    clearTimeout(timeout);
+                    resolve();
+                  } else if (retryCount < maxRetries) {
+                    retryCount++;
+                    setTimeout(tryConnect, retryDelay);
+                  }
+                });
+              }
+            }, 100);
+          } catch (e) {
+            warn('Error during connection attempt:', e);
+            if (retryCount < maxRetries) {
+              retryCount++;
+              setTimeout(tryConnect, retryDelay);
+            } else {
+              reject(new Error('Max retries reached'));
             }
-          }, 100);
-        } catch (e) {
-          warn('Error during connection attempt:', e);
-          if (retryCount < maxRetries) {
-            retryCount++;
-            setTimeout(tryConnect, retryDelay);
-          } else {
-            reject(new Error('Max retries reached'));
           }
         }
-      }
-      
-      // Set a timeout to reject if connection takes too long
-      const timeout = setTimeout(() => {
-        if (!connected) {
-          warn('Communication initialization timed out');
-          reject(new Error('Connection timeout'));
-        }
-      }, 5000);
-
-      // Start connection attempt
-      tryConnect();
+        
+        // Set a timeout to reject if connection takes too long
+        const timeout = setTimeout(() => {
+          if (!connected) {
+            warn('Communication initialization timed out');
+            reject(new Error('Connection timeout'));
+          }
+        }, 5000);
+  
+        // Start connection attempt
+        tryConnect();
     });
   }
 

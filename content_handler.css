@@ -59,7 +59,7 @@
 @media (prefers-color-scheme: dark) {
   .delugesiphon-modal,
   [id^="delugesiphon-modal-"] {
-    background: #2a2a2a !important;
+    background: #202124 !important;
     color: #e8eaed !important;
     border-color: rgba(255,255,255,0.1) !important;
     box-shadow: 0 6px 30px rgba(0,0,0,0.5) !important;
@@ -73,8 +73,8 @@
 
   .delugesiphon-modal .note,
   [id^="delugesiphon-modal-"] .note {
-    background: rgba(255,255,255,0.07) !important;
-    color: #ccc !important;
+    background: rgba(255,255,255,0.05) !important;
+    color: #9aa0a6 !important;
   }
 
   .delugesiphon-modal label,
@@ -86,15 +86,15 @@
   .delugesiphon-modal select,
   [id^="delugesiphon-modal-"] input[type="text"],
   [id^="delugesiphon-modal-"] select {
-    background: #373737 !important;
+    background: #303134 !important;
     color: #e8eaed !important;
     border-color: rgba(255,255,255,0.15) !important;
   }
 
   .delugesiphon-modal input[disabled],
   [id^="delugesiphon-modal-"] input[disabled] {
-    background: #333 !important;
-    color: #999 !important;
+    background: #303134 !important;
+    color: #9aa0a6 !important;
   }
 
   .delugesiphon-modal .actions,
@@ -104,15 +104,16 @@
 
   .delugesiphon-modal button,
   [id^="delugesiphon-modal-"] button {
-    background-color: #444 !important;
+    background-color: rgba(255,255,255,0.05) !important;
     color: #e8eaed !important;
-    border-color: #666 !important;
+    border-color: rgba(255,255,255,0.1) !important;
   }
 
   .delugesiphon-modal button[type="submit"],
   [id^="delugesiphon-modal-"] button[type="submit"] {
-    background-color: #3367d6 !important;
-    color: #fff !important;
+    background-color: #8ab4f8 !important;
+    color: #202124 !important;
+    border-color: #8ab4f8 !important;
   }
 }
 
@@ -383,7 +384,7 @@
 /* Dark mode for toast */
 @media (prefers-color-scheme: dark) {
   .delugesiphon-toast {
-    background: #2a2a2a !important;
+    background: #202124 !important;
     color: #e8eaed !important;
     box-shadow: 0 4px 15px rgba(0,0,0,0.4) !important;
   }
