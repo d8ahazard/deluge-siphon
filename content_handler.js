@@ -460,7 +460,17 @@
           domain: SITE_META.DOMAIN,
           info: { name: 'Add Torrent' },
           cookies: cookies
-      });
+        }, function(response) {
+            if (response?.error) {
+                // Check if it's the "already in session" case
+                if (response.error.includes('already in session')) {
+                    log('Torrent already exists in session');
+                    showToast('Torrent already exists in Deluge', 'warning', 5000);
+                } else {
+                    showToast(`Error adding torrent: ${response.error}`, 'error', 5000);
+                }
+            }
+        });
     }
   }
   }
@@ -723,7 +733,14 @@
                 
                 if (response?.error) {
                     log('Error adding torrent:', response.error);
-                    showToast(`Error adding torrent: ${response.error}`, 'error', 5000);
+                    
+                    // Check if it's the "already in session" case
+                    if (response.error.includes('already in session')) {
+                        log('Torrent already exists in session');
+                        showToast('Torrent already exists in Deluge', 'warning', 5000);
+                    } else {
+                        showToast(`Error adding torrent: ${response.error}`, 'error', 5000);
+                    }
                 } else {
                     log('Torrent added successfully');
                     
@@ -819,7 +836,12 @@
     modal_init();
     
     // Set default regex if none provided
-    const defaultRegex = '^magnet:|(\\/|^)(torrent|torrents|dl|download|get)(\\.php)?(?=.*action=download|\\.torrent)|(\\/|^)(index|download)(\\.php)?(\\&|\\?|\\/)(?=.*torrent)|\\.torrent';
+    // https://passthepopcorn.me/torrents.php?action=download&id=671675&authkey=c058131650a963d2d3813042121794c4&torrent_pass=mjc7q3wiw7i2ij5iyd31ctfleyd74a4x
+    const defaultRegex = '^magnet:'
+      + '|(\\/|^)(torrent|torrents|dl|download|get)(\\.php)?\\?(.*&)?action=download'  // Matches PTP style with action=download
+      + '|(\\/|^)(torrent|torrents|dl|download|get)(\\.php)?\\/(\\d+|[a-f0-9]{32})'   // Matches numeric IDs or hashes
+      + '|(\\/|^)(index|download)(\\.php)?(\\?|\\/).*\\.torrent'                       // Matches .torrent in query/path
+      + '|\\.torrent(\\?.*)?$';                                                        // Matches .torrent files
     
     // Get regex for link checking from settings
     safeSendMessage({

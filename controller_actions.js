@@ -378,6 +378,13 @@ DelugeConnection.prototype._request = function(state, params, silent) {
       debugLog('log', '[_request] Response payload:', JSON.stringify(payload).substring(0, 200) + '...');
       
       if (payload.error) {
+        //logger.js:27 [delugesiphon] Error adding torrent: Error: Failure: [Failure instance: Traceback (failure with no frames): <class 'deluge.error.AddTorrentError'>: Torrent already in session (6b35332ed3481bd5cca00f5058e4d63b674be99a).
+        // If 'already in session' is in the error, it's not really an error
+        if (payload.error.message.includes('already in session')) {
+          debugLog('warn', '[_request] Torrent already in session:', payload.error, url, params);
+          return payload;
+        }
+
         debugLog('warn', '[_request] Server reported error:', payload.error, url, params);
         throw new Error(payload.error.message || 'Unknown server error');
       }
@@ -1047,36 +1054,54 @@ const notificationTimeouts = {};
 const delugeConnection = new DelugeConnection();
 
 function createContextMenu(add, with_options) {
-  chrome.contextMenus.removeAll(() => {
-    if (with_options) {
-      chrome.contextMenus.create({
-        id: 'add-with-options',
-        title: 'Add with Options',
-        contexts: ['link'],
-        targetUrlPatterns: [
-          'magnet:*',
-          '*://*/*.torrent*',
-          '*://*/*/torrent*',
-          '*://*/*/download*',
-          '*://*/*/get*'
-        ]
-      });
+  // Get the regex pattern from storage or use default
+  chrome.storage.local.get('link_regex', function(data) {
+    const defaultRegex = '^magnet:'
+      + '|(\\/|^)(torrent|torrents|dl|download|get)(\\.php)?\\?(.*&)?action=download'
+      + '|(\\/|^)(torrent|torrents|dl|download|get)(\\.php)?\\/(\\d+|[a-f0-9]{32})'
+      + '|(\\/|^)(index|download)(\\.php)?(\\?|\\/).*\\.torrent'
+      + '|\\.torrent(\\?.*)?$';
+
+    const regex = data.link_regex || defaultRegex;
+    const patterns = [
+      'magnet:*',
+      '*://*/*.torrent*',
+      '*://*/*torrent*',
+      '*://*/*download*',
+      '*://*/*get*'
+    ];
+
+    // Convert regex to match patterns where possible
+    try {
+      const regexObj = new RegExp(regex);
+      // Add any custom patterns from the regex that can be converted to match patterns
+      // This is a basic conversion - you may want to enhance this
+      if (regex.includes('.php')) {
+        patterns.push('*://*/*.php*');
+      }
+    } catch (e) {
+      console.warn('Invalid regex pattern:', e);
     }
 
-    if (add) {
-      chrome.contextMenus.create({
-        id: 'add',
-        title: with_options ? 'Add' : 'Add to Deluge',
-        contexts: ['link'],
-        targetUrlPatterns: [
-          'magnet:*',
-          '*://*/*.torrent*',
-          '*://*/*/torrent*',
-          '*://*/*/download*',
-          '*://*/*/get*'
-        ]
-      });
-    }
+    chrome.contextMenus.removeAll(() => {
+      if (with_options) {
+        chrome.contextMenus.create({
+          id: 'add-with-options',
+          title: 'Add with Options',
+          contexts: ['link'],
+          targetUrlPatterns: patterns
+        });
+      }
+
+      if (add) {
+        chrome.contextMenus.create({
+          id: 'add',
+          title: with_options ? 'Add' : 'Add to Deluge',
+          contexts: ['link'],
+          targetUrlPatterns: patterns
+        });
+      }
+    });
   });
 }
 
